@@ -24,12 +24,33 @@ This version adds synchronized dual cursors, patient/case metadata, automatic V-
 ## Run
 
 ```bash
-cd xper_hemo_app_v2
+cd App
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## macOS app distribution
+
+The source code is tracked in git. The generated macOS app and zip are intentionally not committed because the packaged app bundle contains a full Python environment and is large.
+
+Build the local app bundle:
+
+```bash
+cd App
+./packaging/build_macos_app.sh
+```
+
+Refresh the shareable zip:
+
+```bash
+cd App/dist
+rm -f "Xper Hemodynamic Viewer-macOS.zip"
+ditto -c -k --sequesterRsrc --keepParent "Xper Hemodynamic Viewer.app" "Xper Hemodynamic Viewer-macOS.zip"
+```
+
+Recommended sharing path: upload `App/dist/Xper Hemodynamic Viewer-macOS.zip` as a GitHub Release asset, not as a regular committed file.
 
 ## Workflow
 
