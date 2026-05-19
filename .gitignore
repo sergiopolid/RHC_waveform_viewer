@@ -1,0 +1,38 @@
+.DS_Store
+Icon?
+
+# Patient/source data and local research exports
+Patient data/
+*.PW6
+*.pw6
+*.pdf
+*.PDF
+*.jpg
+*.jpeg
+*.png
+*.JPG
+*.JPEG
+*.PNG
+*.sqlite
+*.db
+*.csv
+*.zip
+
+# Python and Streamlit caches
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+venv/
+.streamlit/secrets.toml
+
+# macOS/PyInstaller packaging outputs
+App/.venv-build/
+App/build/
+App/dist/
+App/*.spec
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak

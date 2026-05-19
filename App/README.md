@@ -1,0 +1,152 @@
+# Philips Xper PW6 Hemodynamic Viewer v2
+
+This version adds synchronized dual cursors, patient/case metadata, automatic V-wave interval naming, V-wave morphology metrics, composite indices, ECG timing features, configurable ECG lead extraction, an in-app data dictionary tab, selectable waveform channel visibility, axis controls, and a local SQLite database for accumulated labeled interval statistics.
+
+## New features
+
+- Dual synchronized cursors visible across all waveform panels
+- Active selected frame shaded in all panels
+- Label interval windows such as:
+  - V wave 1
+  - V wave 2
+  - End-expiratory PCWP
+  - PA systole sample
+- Patient / Case ID, procedure date, and notes fields included in every exported CSV
+- Dedicated ECG files can be interpreted as D I / D II / D III sequential leads so leads are not concatenated into one trace
+- Automatic interval labels such as `PatientID_vwave_1`, `PatientID_vwave_2`, `PatientID_vwave_3`
+- Export labeled intervals:
+  - long-format segment CSV
+  - per-interval/per-signal stats CSV
+  - ZIP bundle
+- Save labeled interval statistics to a local one-table SQLite database
+- Compatible across older/newer NumPy using a trapezoid helper
+
+## Run
+
+```bash
+cd xper_hemo_app_v2
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Workflow
+
+1. Upload all `.PW6` files from one case.
+2. Enter Patient / Case ID, optional procedure date, and notes.
+3. Confirm channel mapping.
+4. Choose ECG source and ECG lead. Default ECG file layout is D I / D II / D III sequential leads.
+4. Move Cursor A/B to select a time window.
+5. Enter a label, e.g. `V wave 1`.
+6. Click **Add label**.
+7. Repeat for additional intervals.
+8. Export labeled segments and stats, or append labeled interval statistics to the local database.
+
+## Export files
+
+- `current_selected_segment.csv`
+- `current_selected_segment_stats.csv`
+- `aligned_full_waveforms.csv`
+- `labeled_intervals_segments_long.csv`
+- `labeled_intervals_stats.csv`
+- `xper_hemo_export_bundle.zip`
+
+## Local database
+
+The Database section can append labeled interval statistics to:
+
+`~/Documents/Xper Hemodynamic Viewer/xper_hemo_cases.sqlite`
+
+The database uses one table, `labeled_interval_stats`, with one row per labeled interval per signal. It includes case metadata, source filenames, interval labels/timing, waveform statistics, morphology metrics, ECG timing metrics when available, and a save timestamp.
+
+## Morphology metrics added in v5
+
+For every selected or labeled interval, the stats CSV now includes morphology-focused metrics:
+
+- `raw_auc_to_zero`
+- `auc_above_start_baseline`
+- `auc_above_horizontal_baseline`
+- `excess_auc_linear_baseline_net`
+- `excess_auc_linear_baseline_positive`
+- `normalized_positive_excess_auc`
+- `baseline_start`
+- `baseline_end`
+- `peak_value`
+- `peak_above_linear_baseline`
+- `time_to_excess_peak_s`
+- `excess_rise_slope_units_per_s`
+- `excess_fall_slope_units_per_s`
+- `fwhm_excess_s`
+- `symmetry_index_excess_peak`
+
+The recommended primary V-wave morphology metric is:
+
+`excess_auc_linear_baseline_positive`
+
+This calculates the positive area above a straight line connecting the beginning and end of the selected interval, rather than area to y=0.
+
+
+## Composite research metrics added in v6
+
+Additional metrics intended for amyloid/restrictive CM vs HFrEF comparisons:
+
+- `vwave_sharpness_index` = `peak_above_linear_baseline / fwhm_excess_s`
+- `area_density_index` = `excess_auc_linear_baseline_positive / fwhm_excess_s`
+- `relative_vwave_amplitude` = `peak_above_linear_baseline / mean`
+- `relative_vwave_amplitude_to_median` = `peak_above_linear_baseline / median`
+- `vwave_burden_ratio` = `excess_auc_linear_baseline_positive / raw_auc_to_zero`
+- `slope_area_ratio` = `excess_rise_slope_units_per_s / normalized_positive_excess_auc`
+- `rise_to_fall_slope_ratio` = `abs(excess_rise_slope) / abs(excess_fall_slope)`
+
+## ECG timing features added in v6
+
+When an ECG channel is available, the app attempts to detect R waves and adds:
+
+- `previous_r_time_s`
+- `next_r_time_s`
+- `qrs_to_excess_peak_ms`
+- `rr_cycle_length_ms`
+- `cycle_normalized_excess_peak_phase`
+
+These timing features help relate selected PCWP/RA V-wave morphology to the cardiac cycle.
+
+
+## Data dictionary tab added in v7
+
+The app now includes a separate **Data dictionary** tab with:
+
+- Searchable variable definitions
+- Category filtering
+- Recommended feature set for amyloid/restrictive CM vs HFrEF V-wave morphology analysis
+- Downloadable data dictionary CSV
+- Downloadable recommended feature set CSV
+
+
+## Channel visibility added in v8
+
+The waveform viewer now includes a **Waveform channel visibility** selector.
+
+Use it to display only selected channels, for example:
+
+- EKG + PCWP
+- EKG + PA + PCWP
+- RA + PCWP
+- PA only
+
+By default, exports include all mapped channels. You can optionally check **Export only displayed channels** if you want the exported aligned waveform/segment files to include only the channels visible on the plot.
+
+
+## Axis controls added in v9
+
+The waveform viewer now includes **Axis controls**:
+
+- Optional custom x-axis time range
+- Optional shared y-axis range for all pressure channels
+- Optional per-channel y-axis ranges
+
+Examples:
+- Focus the x-axis on 1.5–2.5 seconds
+- Set PCWP y-axis to 0–40 mmHg
+- Use a shared pressure axis for RA/RV/PA/PCWP to compare amplitudes visually
+- Keep ECG on its own mV axis
