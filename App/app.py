@@ -1,4 +1,5 @@
 import io
+import html
 import re
 import sqlite3
 import zipfile
@@ -8,13 +9,15 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.io as pio
 from plotly.subplots import make_subplots
 import streamlit as st
 
 
 DATABASE_TABLE = "labeled_interval_stats"
-APP_VERSION = "v0.7.5"
-APP_VERSION_DATE = "2026-05-19"
+DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
+APP_VERSION = "v0.7.6"
+APP_VERSION_DATE = "2026-05-25"
 
 
 def trapezoid_area(y, x):
@@ -646,6 +649,33 @@ def build_labeled_exports(aligned: pd.DataFrame, intervals: list, signal_cols: l
     return labeled_segments, labeled_stats
 
 
+def build_labeled_raw_segments(aligned: pd.DataFrame, intervals: list, signal_cols: list):
+    """
+    Build wide-form raw waveform samples for each labeled interval.
+    This is intended for downstream ML/AI workflows and visual replay.
+    """
+    parts = []
+    for i, item in enumerate(intervals):
+        label = item["label"]
+        start_s = float(item["start_s"])
+        end_s = float(item["end_s"])
+        lo, hi = sorted([start_s, end_s])
+        segment = get_segment(aligned, lo, hi)
+        if segment.empty:
+            continue
+
+        available_cols = ["time_s"] + [c for c in signal_cols if c in segment.columns]
+        wide = segment[available_cols].copy()
+        wide.insert(0, "interval_id", i + 1)
+        wide.insert(1, "interval_label", label)
+        wide.insert(2, "interval_start_s", lo)
+        wide.insert(3, "interval_end_s", hi)
+        wide.insert(4, "relative_time_s", wide["time_s"] - lo)
+        parts.append(wide)
+
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+
 def add_case_metadata(df: pd.DataFrame, patient_id: str = "", procedure_date: str = "", notes: str = ""):
     """
     Add case-level metadata columns to exported tables.
@@ -663,6 +693,8 @@ def package_outputs(
     stats: pd.DataFrame,
     labeled_segments: pd.DataFrame,
     labeled_stats: pd.DataFrame,
+    raw_labeled_segments: pd.DataFrame,
+    labeled_visualizations_html: str = "",
     patient_id: str = "",
     procedure_date: str = "",
     notes: str = "",
@@ -674,8 +706,12 @@ def package_outputs(
         z.writestr("current_selected_segment_stats.csv", add_case_metadata(stats, patient_id, procedure_date, notes).to_csv(index=False))
         if not labeled_segments.empty:
             z.writestr("labeled_intervals_segments_long.csv", add_case_metadata(labeled_segments, patient_id, procedure_date, notes).to_csv(index=False))
+        if not raw_labeled_segments.empty:
+            z.writestr("raw_labeled_waveform_segments_wide.csv", add_case_metadata(raw_labeled_segments, patient_id, procedure_date, notes).to_csv(index=False))
         if not labeled_stats.empty:
             z.writestr("labeled_intervals_stats.csv", add_case_metadata(labeled_stats, patient_id, procedure_date, notes).to_csv(index=False))
+        if labeled_visualizations_html:
+            z.writestr("labeled_interval_visualizations.html", labeled_visualizations_html)
 
         metadata = pd.DataFrame([{
             "patient_id": patient_id,
@@ -685,6 +721,106 @@ def package_outputs(
         z.writestr("case_metadata.csv", metadata.to_csv(index=False))
     mem.seek(0)
     return mem
+
+
+def segment_signal_columns(df: pd.DataFrame):
+    metadata_cols = {
+        "saved_at",
+        "source_files",
+        "database_case_key",
+        "patient_id",
+        "procedure_date",
+        "case_notes",
+        "interval_id",
+        "interval_label",
+        "interval_start_s",
+        "interval_end_s",
+        "relative_time_s",
+        "time_s",
+    }
+    return [c for c in df.columns if c not in metadata_cols and pd.api.types.is_numeric_dtype(df[c])]
+
+
+def labeled_interval_figure(segment_df: pd.DataFrame, title: str = "Labeled waveform segment"):
+    signal_cols = segment_signal_columns(segment_df)
+    pressure_cols = sorted([c for c in signal_cols if "EKG" not in c.upper()], key=pressure_sort_key)
+    ecg_cols = sorted([c for c in signal_cols if "EKG" in c.upper()])
+    plot_cols = ecg_cols + pressure_cols
+
+    rows = 2 if ecg_cols and pressure_cols else 1
+    fig = make_subplots(
+        rows=rows,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=(["EKG", "Pressure"] if rows == 2 else ["Waveform segment"]),
+    )
+
+    x = segment_df["relative_time_s"] if "relative_time_s" in segment_df.columns else segment_df["time_s"]
+    for c in plot_cols:
+        is_ecg = "EKG" in c.upper()
+        row = 1 if rows == 1 or is_ecg else 2
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=segment_df[c],
+                mode="lines",
+                name=c,
+                hovertemplate=f"Time: %{{x:.3f}} s<br>{c}: %{{y:.3f}}<extra></extra>",
+            ),
+            row=row,
+            col=1,
+        )
+
+    fig.update_xaxes(title_text="Relative time (s)", row=rows, col=1)
+    fig.update_yaxes(title_text="mV", row=1, col=1)
+    if rows == 2:
+        fig.update_yaxes(title_text="mmHg", row=2, col=1)
+    else:
+        fig.update_yaxes(title_text="Value", row=1, col=1)
+
+    fig.update_layout(
+        title=title,
+        height=460 if rows == 2 else 330,
+        hovermode="x",
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+        margin=dict(t=70, b=95),
+    )
+    return fig
+
+
+def build_labeled_visualizations_html(
+    raw_labeled_segments: pd.DataFrame,
+    patient_id: str = "",
+    procedure_date: str = "",
+):
+    if raw_labeled_segments.empty:
+        return ""
+
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        "<title>Labeled waveform segments</title>",
+        "<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:28px;color:#111827;}"
+        ".segment{margin:0 0 42px;} h1{margin-bottom:0.2rem;} .meta{color:#6b7280;margin-bottom:2rem;}</style>",
+        "</head><body>",
+        "<h1>Labeled waveform segments</h1>",
+        f"<div class='meta'>Patient/case: {html.escape(patient_id or 'Unknown')}"
+        f"{' | Procedure date: ' + html.escape(procedure_date) if procedure_date else ''}</div>",
+    ]
+
+    include_plotlyjs = True
+    grouping_cols = ["interval_id", "interval_label", "interval_start_s", "interval_end_s"]
+    for keys, segment_df in raw_labeled_segments.groupby(grouping_cols, dropna=False, sort=True):
+        interval_id, label, start_s, end_s = keys
+        title = f"{interval_id}. {label} ({float(start_s):.3f}-{float(end_s):.3f} s)"
+        fig = labeled_interval_figure(segment_df, title=title)
+        parts.append("<div class='segment'>")
+        parts.append(pio.to_html(fig, full_html=False, include_plotlyjs=True if include_plotlyjs else False))
+        parts.append("</div>")
+        include_plotlyjs = False
+
+    parts.append("</body></html>")
+    return "\n".join(parts)
 
 
 def default_database_path() -> Path:
@@ -736,44 +872,69 @@ def ensure_sqlite_table(conn: sqlite3.Connection, table_name: str, df: pd.DataFr
 
 def save_labeled_stats_to_database(
     labeled_stats: pd.DataFrame,
+    raw_labeled_segments: pd.DataFrame,
     patient_id: str,
     procedure_date: str,
     notes: str,
     source_files: list[str],
     db_path: Path,
-) -> int:
-    if labeled_stats.empty:
-        return 0
+) -> dict:
+    if labeled_stats.empty and raw_labeled_segments.empty:
+        return {"stats_rows": 0, "segment_rows": 0}
 
-    rows = add_case_metadata(labeled_stats, patient_id, procedure_date, notes)
-    rows.insert(0, "saved_at", datetime.now().isoformat(timespec="seconds"))
-    rows.insert(1, "source_files", "; ".join(source_files))
-    rows.insert(2, "database_case_key", sanitize_label_token(patient_id))
-    rows = normalize_for_sqlite(rows)
+    saved_at = datetime.now().isoformat(timespec="seconds")
+    source_files_text = "; ".join(source_files)
+    database_case_key = sanitize_label_token(patient_id)
+
+    stats_rows = pd.DataFrame()
+    if not labeled_stats.empty:
+        stats_rows = add_case_metadata(labeled_stats, patient_id, procedure_date, notes)
+        stats_rows.insert(0, "saved_at", saved_at)
+        stats_rows.insert(1, "source_files", source_files_text)
+        stats_rows.insert(2, "database_case_key", database_case_key)
+        stats_rows = normalize_for_sqlite(stats_rows)
+
+    segment_rows = pd.DataFrame()
+    if not raw_labeled_segments.empty:
+        segment_rows = add_case_metadata(raw_labeled_segments, patient_id, procedure_date, notes)
+        segment_rows.insert(0, "saved_at", saved_at)
+        segment_rows.insert(1, "source_files", source_files_text)
+        segment_rows.insert(2, "database_case_key", database_case_key)
+        segment_rows = normalize_for_sqlite(segment_rows)
 
     db_path = Path(db_path).expanduser()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(db_path) as conn:
-        ensure_sqlite_table(conn, DATABASE_TABLE, rows)
-        rows.to_sql(DATABASE_TABLE, conn, if_exists="append", index=False)
-    return len(rows)
+        if not stats_rows.empty:
+            ensure_sqlite_table(conn, DATABASE_TABLE, stats_rows)
+            stats_rows.to_sql(DATABASE_TABLE, conn, if_exists="append", index=False)
+        if not segment_rows.empty:
+            ensure_sqlite_table(conn, DATABASE_SEGMENTS_TABLE, segment_rows)
+            segment_rows.to_sql(DATABASE_SEGMENTS_TABLE, conn, if_exists="append", index=False)
+    return {"stats_rows": len(stats_rows), "segment_rows": len(segment_rows)}
 
 
-def load_database_rows(db_path: Path) -> pd.DataFrame:
+def load_database_table(db_path: Path, table_name: str) -> pd.DataFrame:
     db_path = Path(db_path).expanduser()
     if not db_path.exists():
         return pd.DataFrame()
     with sqlite3.connect(db_path) as conn:
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-            (DATABASE_TABLE,),
+            (table_name,),
         ).fetchone()
         if table_exists is None:
             return pd.DataFrame()
-        return pd.read_sql_query(
-            f"SELECT * FROM {quote_sql_identifier(DATABASE_TABLE)} ORDER BY saved_at DESC",
-            conn,
-        )
+        order_clause = " ORDER BY saved_at DESC" if table_name == DATABASE_TABLE else " ORDER BY saved_at DESC, interval_id, time_s"
+        return pd.read_sql_query(f"SELECT * FROM {quote_sql_identifier(table_name)}{order_clause}", conn)
+
+
+def load_database_rows(db_path: Path) -> pd.DataFrame:
+    return load_database_table(db_path, DATABASE_TABLE)
+
+
+def load_database_segments(db_path: Path) -> pd.DataFrame:
+    return load_database_table(db_path, DATABASE_SEGMENTS_TABLE)
 
 
 def database_summary(db_path: Path) -> dict:
@@ -1960,7 +2121,7 @@ viewer_tab, database_tab, dictionary_tab = st.tabs(["Waveform viewer", "Database
 
 with database_tab:
     st.subheader("Accumulated interval database")
-    st.caption("Local SQLite database with one table: one row per labeled interval per waveform signal.")
+    st.caption("Local SQLite database with interval statistics plus raw waveform samples for visual replay.")
 
     db_path_input = st.text_input(
         "Database file",
@@ -1970,11 +2131,13 @@ with database_tab:
     st.session_state.database_path = db_path_input
     db_path = Path(db_path_input).expanduser()
 
+    db_segments = load_database_segments(db_path)
     summary = database_summary(db_path)
     m1, m2, m3 = st.columns(3)
     m1.metric("Rows", summary["rows"])
     m2.metric("Cases", summary["cases"])
     m3.metric("Intervals", summary["intervals"])
+    st.metric("Saved waveform samples", len(db_segments))
 
     db_rows = load_database_rows(db_path)
     if db_rows.empty:
@@ -1990,6 +2153,47 @@ with database_tab:
             "Download database table CSV",
             db_rows.to_csv(index=False).encode("utf-8"),
             "xper_hemo_accumulated_interval_stats.csv",
+            "text/csv",
+        )
+
+    if not db_segments.empty:
+        st.subheader("Saved waveform segment preview")
+        interval_keys = (
+            db_segments[
+                ["saved_at", "patient_id", "interval_id", "interval_label", "interval_start_s", "interval_end_s"]
+            ]
+            .drop_duplicates()
+            .sort_values(["saved_at", "patient_id", "interval_id"], ascending=[False, True, True])
+            .reset_index(drop=True)
+        )
+        selected_idx = st.selectbox(
+            "Saved segment",
+            options=list(range(len(interval_keys))),
+            format_func=lambda i: (
+                f"{interval_keys.loc[i, 'saved_at']} | {interval_keys.loc[i, 'patient_id']} | "
+                f"{interval_keys.loc[i, 'interval_label']} "
+                f"({float(interval_keys.loc[i, 'interval_start_s']):.3f}-{float(interval_keys.loc[i, 'interval_end_s']):.3f} s)"
+            ),
+            key="saved_segment_preview_select",
+        )
+        selected_key = interval_keys.loc[selected_idx]
+        preview = db_segments[
+            (db_segments["saved_at"] == selected_key["saved_at"])
+            & (db_segments["patient_id"] == selected_key["patient_id"])
+            & (db_segments["interval_id"] == selected_key["interval_id"])
+            & (db_segments["interval_label"] == selected_key["interval_label"])
+        ].copy()
+        st.plotly_chart(
+            labeled_interval_figure(preview, title=f"Saved segment: {selected_key['interval_label']}"),
+            width="stretch",
+            key="saved_segment_preview_plot",
+        )
+        with st.expander("Saved raw samples for this interval"):
+            st.dataframe(preview, width="stretch", hide_index=True)
+        st.download_button(
+            "Download saved segment raw CSV",
+            preview.to_csv(index=False).encode("utf-8"),
+            "saved_labeled_waveform_segment.csv",
             "text/csv",
         )
 
@@ -2521,6 +2725,8 @@ with viewer_tab:
 
     labeled_segments, labeled_stats = build_labeled_exports(aligned, st.session_state.intervals, analysis_signal_cols)
     labeled_stats = add_ecg_timing_metrics(labeled_stats, r_waves, r_wave_source_file, r_wave_source_signal)
+    raw_labeled_segments = build_labeled_raw_segments(aligned, st.session_state.intervals, signal_cols)
+    labeled_visualizations_html = build_labeled_visualizations_html(raw_labeled_segments, patient_id, procedure_date)
 
     # Plot
     st.subheader("Waveform viewer with synchronized dual cursors")
@@ -2769,13 +2975,17 @@ with viewer_tab:
             else:
                 saved_rows = save_labeled_stats_to_database(
                     labeled_stats=labeled_stats,
+                    raw_labeled_segments=raw_labeled_segments,
                     patient_id=patient_id,
                     procedure_date=procedure_date,
                     notes=notes,
                     source_files=[up.name for up in uploaded],
                     db_path=Path(st.session_state.database_path),
                 )
-                st.success(f"Saved {saved_rows} rows to {Path(st.session_state.database_path).expanduser()}.")
+                st.success(
+                    f"Saved {saved_rows['stats_rows']} stat rows and {saved_rows['segment_rows']} waveform sample rows "
+                    f"to {Path(st.session_state.database_path).expanduser()}."
+                )
 
     st.subheader("Export")
     export_aligned_cols = ["time_s"] + (display_signal_cols if export_display_only else signal_cols)
@@ -2787,9 +2997,21 @@ with viewer_tab:
     csv_stats = add_case_metadata(stats, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8")
     csv_aligned = add_case_metadata(export_aligned, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8")
     csv_labeled_segments = add_case_metadata(labeled_segments, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not labeled_segments.empty else b""
+    csv_raw_labeled_segments = add_case_metadata(raw_labeled_segments, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not raw_labeled_segments.empty else b""
     csv_labeled_stats = add_case_metadata(labeled_stats, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not labeled_stats.empty else b""
 
-    zip_outputs = package_outputs(export_aligned, export_segment, stats, labeled_segments, labeled_stats, patient_id, procedure_date, notes)
+    zip_outputs = package_outputs(
+        export_aligned,
+        export_segment,
+        stats,
+        labeled_segments,
+        labeled_stats,
+        raw_labeled_segments,
+        labeled_visualizations_html,
+        patient_id,
+        procedure_date,
+        notes,
+    )
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -2818,6 +3040,26 @@ with viewer_tab:
         )
     with c6:
         st.download_button("Download ZIP bundle", zip_outputs, "xper_hemo_export_bundle.zip", "application/zip")
+
+    c7, c8 = st.columns(2)
+    with c7:
+        st.download_button(
+            "Download raw labeled waveform segments CSV",
+            csv_raw_labeled_segments,
+            "raw_labeled_waveform_segments_wide.csv",
+            "text/csv",
+            disabled=raw_labeled_segments.empty,
+            help="Wide-form raw samples for every labeled interval and all mapped waveform channels, intended for AI/ML.",
+        )
+    with c8:
+        st.download_button(
+            "Download labeled interval visualizations HTML",
+            labeled_visualizations_html.encode("utf-8") if labeled_visualizations_html else b"",
+            "labeled_interval_visualizations.html",
+            "text/html",
+            disabled=not labeled_visualizations_html,
+            help="Standalone interactive HTML plots for reopening the saved segment visuals.",
+        )
 
     st.subheader("Notes")
     st.markdown(
