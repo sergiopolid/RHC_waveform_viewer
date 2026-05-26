@@ -42,6 +42,7 @@ pyinstaller \
   --onedir \
   --clean \
   --add-data "app.py:." \
+  --add-data "assets:assets" \
   --collect-all streamlit \
   --collect-all plotly \
   --collect-all scipy \

@@ -1,6 +1,7 @@
 import io
 import html
 import os
+import base64
 import re
 import sqlite3
 import zipfile
@@ -17,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.7.7"
+APP_VERSION = "v0.7.8"
 APP_VERSION_DATE = "2026-05-25"
 
 
@@ -837,6 +838,14 @@ def app_setting(name: str, default: str = "") -> str:
     except Exception:
         value = ""
     return str(value or os.environ.get(name, default) or "")
+
+
+def asset_data_uri(relative_path: str, mime_type: str = "image/png") -> str:
+    path = Path(__file__).resolve().parent / relative_path
+    if not path.exists():
+        return ""
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime_type};base64,{data}"
 
 
 def require_password_if_configured():
@@ -3117,11 +3126,13 @@ with viewer_tab:
     """
     )
 
-st.markdown(
-    """
-    <div style="text-align: center; color: #6b7280; font-size: 0.85rem; padding: 2rem 0 1rem;">
-        PoliOmics®
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+logo_data_uri = asset_data_uri("assets/poliomics_logo.png")
+if logo_data_uri:
+    st.markdown(
+        f"""
+        <div style="display: flex; justify-content: center; padding: 2rem 0 1rem;">
+            <img src="{logo_data_uri}" alt="PoliOmics" style="width: 150px; max-width: 34vw;">
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )

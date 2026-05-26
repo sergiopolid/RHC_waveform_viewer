@@ -13,6 +13,8 @@ Patient data/
 *.JPG
 *.JPEG
 *.PNG
+!App/assets/
+!App/assets/poliomics_logo.png
 *.sqlite
 *.db
 *.csv
