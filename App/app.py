@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.7.8"
+APP_VERSION = "v0.7.9"
 APP_VERSION_DATE = "2026-05-25"
 
 
@@ -3040,13 +3040,6 @@ with viewer_tab:
     export_aligned = aligned[export_aligned_cols].copy()
     export_segment = segment[export_segment_cols].copy()
 
-    csv_segment = add_case_metadata(export_segment, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8")
-    csv_stats = add_case_metadata(stats, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8")
-    csv_aligned = add_case_metadata(export_aligned, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8")
-    csv_labeled_segments = add_case_metadata(labeled_segments, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not labeled_segments.empty else b""
-    csv_raw_labeled_segments = add_case_metadata(raw_labeled_segments, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not raw_labeled_segments.empty else b""
-    csv_labeled_stats = add_case_metadata(labeled_stats, patient_id, procedure_date, notes).to_csv(index=False).encode("utf-8") if not labeled_stats.empty else b""
-
     zip_outputs = package_outputs(
         export_aligned,
         export_segment,
@@ -3060,53 +3053,18 @@ with viewer_tab:
         notes,
     )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.download_button("Download current segment CSV", csv_segment, "current_selected_segment.csv", "text/csv")
-    with c2:
-        st.download_button("Download current stats CSV", csv_stats, "current_selected_segment_stats.csv", "text/csv")
-    with c3:
-        st.download_button("Download full aligned CSV", csv_aligned, "aligned_full_waveforms.csv", "text/csv")
-
-    c4, c5, c6 = st.columns(3)
-    with c4:
-        st.download_button(
-            "Download labeled segments CSV",
-            csv_labeled_segments,
-            "labeled_intervals_segments_long.csv",
-            "text/csv",
-            disabled=labeled_segments.empty,
-        )
-    with c5:
-        st.download_button(
-            "Download labeled interval stats CSV",
-            csv_labeled_stats,
-            "labeled_intervals_stats.csv",
-            "text/csv",
-            disabled=labeled_stats.empty,
-        )
-    with c6:
-        st.download_button("Download ZIP bundle", zip_outputs, "xper_hemo_export_bundle.zip", "application/zip")
-
-    c7, c8 = st.columns(2)
-    with c7:
-        st.download_button(
-            "Download raw labeled waveform segments CSV",
-            csv_raw_labeled_segments,
-            "raw_labeled_waveform_segments_wide.csv",
-            "text/csv",
-            disabled=raw_labeled_segments.empty,
-            help="Wide-form raw samples for every labeled interval and all mapped waveform channels, intended for AI/ML.",
-        )
-    with c8:
-        st.download_button(
-            "Download labeled interval visualizations HTML",
-            labeled_visualizations_html.encode("utf-8") if labeled_visualizations_html else b"",
-            "labeled_interval_visualizations.html",
-            "text/html",
-            disabled=not labeled_visualizations_html,
-            help="Standalone interactive HTML plots for reopening the saved segment visuals.",
-        )
+    st.caption(
+        "Downloads one ZIP with the current selected segment, full aligned waveforms, labeled interval stats, "
+        "raw labeled waveform samples, visualization HTML, and case metadata."
+    )
+    st.download_button(
+        "Download export bundle",
+        zip_outputs,
+        "xper_hemo_export_bundle.zip",
+        "application/zip",
+        width="stretch",
+        type="primary",
+    )
 
     st.subheader("Notes")
     st.markdown(
