@@ -81,9 +81,29 @@ The Database section can append labeled interval statistics to:
 
 `~/Documents/Xper Hemodynamic Viewer/xper_hemo_cases.sqlite`
 
+You can override this with an environment variable or Streamlit secret:
+
+`XPER_DATABASE_PATH=/path/to/xper_hemo_cases.sqlite`
+
 The database uses one table, `labeled_interval_stats`, with one row per labeled interval per signal. It includes case metadata, source filenames, interval labels/timing, waveform statistics, morphology metrics, ECG timing metrics when available, and a save timestamp.
 
 Saved intervals also write raw waveform samples to `labeled_interval_segments`, with one row per time point per labeled interval and one column per mapped waveform channel. The Database tab can replay saved intervals visually from this table.
+
+## Website deployment and password
+
+For Streamlit Cloud, use:
+
+- Repository: `sergiopolid/RHC_waveform_viewer`
+- Branch: `main`
+- Main file path: `App/app.py`
+
+Optional password protection is controlled by a Streamlit secret or environment variable:
+
+`APP_PASSWORD=your-password-here`
+
+If `APP_PASSWORD` is set, the app shows a password screen before the waveform viewer opens. If it is not set, the app opens normally for local use.
+
+Important persistence note: SQLite is a file on the machine/server running the app. On a hosted Streamlit website, that file may reset when the app redeploys, restarts, or moves servers. For a fully website-based shared database, use a persistent hosted database such as Supabase/Postgres instead of local SQLite.
 
 ## Morphology metrics added in v5
 

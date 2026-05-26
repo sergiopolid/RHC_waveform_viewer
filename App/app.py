@@ -1,5 +1,6 @@
 import io
 import html
+import os
 import re
 import sqlite3
 import zipfile
@@ -16,7 +17,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.7.6"
+APP_VERSION = "v0.7.7"
 APP_VERSION_DATE = "2026-05-25"
 
 
@@ -824,7 +825,42 @@ def build_labeled_visualizations_html(
 
 
 def default_database_path() -> Path:
+    configured_path = app_setting("XPER_DATABASE_PATH", "")
+    if configured_path:
+        return Path(configured_path).expanduser()
     return Path.home() / "Documents" / "Xper Hemodynamic Viewer" / "xper_hemo_cases.sqlite"
+
+
+def app_setting(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name, "")
+    except Exception:
+        value = ""
+    return str(value or os.environ.get(name, default) or "")
+
+
+def require_password_if_configured():
+    expected_password = app_setting("APP_PASSWORD", "")
+    if not expected_password:
+        return
+
+    if st.session_state.get("authenticated", False):
+        with st.sidebar:
+            if st.button("Lock app"):
+                st.session_state.authenticated = False
+                st.rerun()
+        return
+
+    st.title("Hemodynamic RHC Viewer")
+    st.caption("Enter the app password to continue.")
+    entered_password = st.text_input("Password", type="password", key="app_password_entry")
+    if st.button("Open app", type="primary"):
+        if entered_password == expected_password:
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Incorrect password.")
+    st.stop()
 
 
 def quote_sql_identifier(name: str) -> str:
@@ -2062,6 +2098,8 @@ def get_recommended_feature_set():
 # -----------------------------
 
 st.set_page_config(page_title="Hemodynamic RHC Viewer", layout="wide")
+
+require_password_if_configured()
 
 st.title("Hemodynamic RHC Viewer")
 st.caption(
