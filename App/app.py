@@ -18,8 +18,8 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.7.9"
-APP_VERSION_DATE = "2026-05-25"
+APP_VERSION = "v0.8.0"
+APP_VERSION_DATE = "2026-05-27"
 
 
 def trapezoid_area(y, x):
@@ -696,7 +696,6 @@ def package_outputs(
     labeled_segments: pd.DataFrame,
     labeled_stats: pd.DataFrame,
     raw_labeled_segments: pd.DataFrame,
-    labeled_visualizations_html: str = "",
     patient_id: str = "",
     procedure_date: str = "",
     notes: str = "",
@@ -712,8 +711,6 @@ def package_outputs(
             z.writestr("raw_labeled_waveform_segments_wide.csv", add_case_metadata(raw_labeled_segments, patient_id, procedure_date, notes).to_csv(index=False))
         if not labeled_stats.empty:
             z.writestr("labeled_intervals_stats.csv", add_case_metadata(labeled_stats, patient_id, procedure_date, notes).to_csv(index=False))
-        if labeled_visualizations_html:
-            z.writestr("labeled_interval_visualizations.html", labeled_visualizations_html)
 
         metadata = pd.DataFrame([{
             "patient_id": patient_id,
@@ -2123,12 +2120,18 @@ if "case_reset_nonce" not in st.session_state:
     st.session_state.case_reset_nonce = 0
 if "last_upload_signature" not in st.session_state:
     st.session_state.last_upload_signature = None
+if "pending_restored_interval_set" not in st.session_state:
+    st.session_state.pending_restored_interval_set = None
+if "applied_restored_interval_key" not in st.session_state:
+    st.session_state.applied_restored_interval_key = None
 
 
 def reset_case_state():
     st.session_state.case_reset_nonce += 1
     st.session_state.intervals = []
     st.session_state.last_upload_signature = None
+    st.session_state.pending_restored_interval_set = None
+    st.session_state.applied_restored_interval_key = None
 
 
 def cursor_keys(case_key):
@@ -2163,6 +2166,50 @@ def sync_cursor_from_inputs(case_key, duration_s):
         st.session_state.get(cursor_b_key, min(1.00, float(duration_s))),
         duration_s,
     )
+
+
+def normalize_interval_records(intervals: list, duration_s: float | None = None):
+    normalized = []
+    for item in intervals:
+        label = str(item.get("label", "")).strip() or "Interval"
+        start_s = float(item.get("start_s", 0.0))
+        end_s = float(item.get("end_s", start_s))
+        if duration_s is not None:
+            start_s = min(max(start_s, 0.0), float(duration_s))
+            end_s = min(max(end_s, 0.0), float(duration_s))
+        lo, hi = sorted([start_s, end_s])
+        normalized.append({"label": label, "start_s": lo, "end_s": hi})
+    return normalized
+
+
+def saved_interval_sets(db_rows: pd.DataFrame):
+    required = {"saved_at", "patient_id", "source_files", "interval_id", "interval_label", "interval_start_s", "interval_end_s"}
+    if db_rows.empty or not required.issubset(db_rows.columns):
+        return pd.DataFrame()
+    interval_sets = db_rows.copy()
+    if "procedure_date" not in interval_sets.columns:
+        interval_sets["procedure_date"] = ""
+    return (
+        interval_sets[
+            ["saved_at", "patient_id", "procedure_date", "source_files", "interval_id", "interval_label", "interval_start_s", "interval_end_s"]
+        ]
+        .drop_duplicates()
+        .sort_values(["saved_at", "patient_id", "interval_id"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+
+
+def interval_set_options(interval_sets: pd.DataFrame):
+    if interval_sets.empty:
+        return []
+    grouped = (
+        interval_sets.groupby(["saved_at", "patient_id", "procedure_date", "source_files"], dropna=False)
+        .agg(interval_count=("interval_id", "nunique"))
+        .reset_index()
+        .sort_values("saved_at", ascending=False)
+    )
+    return grouped.to_dict("records")
+
 
 viewer_tab, database_tab, dictionary_tab = st.tabs(["Waveform viewer", "Database", "Data dictionary"])
 
@@ -2202,6 +2249,52 @@ with database_tab:
             "xper_hemo_accumulated_interval_stats.csv",
             "text/csv",
         )
+
+        interval_sets = saved_interval_sets(db_rows)
+        options = interval_set_options(interval_sets)
+        if options:
+            st.subheader("Restore saved interval set")
+            st.caption(
+                "Loads a saved set of interval labels/times back into the Waveform viewer. "
+                "Upload the same PW6 files there, then the shaded selections can be edited and re-saved."
+            )
+            selected_restore_idx = st.selectbox(
+                "Saved case/session",
+                options=list(range(len(options))),
+                format_func=lambda i: (
+                    f"{options[i]['saved_at']} | {options[i]['patient_id']} | "
+                    f"{options[i]['interval_count']} interval(s)"
+                ),
+                key="restore_interval_set_select",
+            )
+            selected_restore = options[selected_restore_idx]
+            restore_rows = interval_sets[
+                (interval_sets["saved_at"] == selected_restore["saved_at"])
+                & (interval_sets["patient_id"] == selected_restore["patient_id"])
+                & (interval_sets["source_files"] == selected_restore["source_files"])
+            ].copy()
+            st.dataframe(
+                restore_rows[["interval_id", "interval_label", "interval_start_s", "interval_end_s"]],
+                width="stretch",
+                hide_index=True,
+            )
+            if st.button("Load these intervals into Waveform viewer", type="primary", width="stretch"):
+                restored_intervals = [
+                    {
+                        "label": row["interval_label"],
+                        "start_s": float(row["interval_start_s"]),
+                        "end_s": float(row["interval_end_s"]),
+                    }
+                    for _, row in restore_rows.sort_values("interval_id").iterrows()
+                ]
+                st.session_state.pending_restored_interval_set = {
+                    "key": f"{selected_restore['saved_at']}|{selected_restore['patient_id']}|{selected_restore['source_files']}",
+                    "intervals": normalize_interval_records(restored_intervals),
+                    "patient_id": selected_restore["patient_id"],
+                    "procedure_date": "" if pd.isna(selected_restore["procedure_date"]) else str(selected_restore["procedure_date"]),
+                    "source_files": selected_restore["source_files"],
+                }
+                st.success("Saved intervals are ready. Open the Waveform viewer and upload the matching PW6 files.")
 
     if not db_segments.empty:
         st.subheader("Saved waveform segment preview")
@@ -2331,6 +2424,13 @@ with viewer_tab:
             "Single ECG trace": "single",
         }[ecg_layout_label]
 
+        pending_restore = st.session_state.get("pending_restored_interval_set")
+        if pending_restore:
+            if f"patient_id_{case_key}" not in st.session_state and pending_restore.get("patient_id"):
+                st.session_state[f"patient_id_{case_key}"] = str(pending_restore["patient_id"])
+            if f"procedure_date_{case_key}" not in st.session_state and pending_restore.get("procedure_date"):
+                st.session_state[f"procedure_date_{case_key}"] = str(pending_restore["procedure_date"])
+
         st.header("Case metadata")
         patient_id = st.text_input("Patient / Case ID", value="", key=f"patient_id_{case_key}").strip()
         procedure_date = st.text_input("Procedure date", value="", key=f"procedure_date_{case_key}").strip()
@@ -2419,6 +2519,26 @@ with viewer_tab:
     if st.session_state.last_upload_signature != upload_signature:
         st.session_state.intervals = []
         st.session_state.last_upload_signature = upload_signature
+
+    pending_restore = st.session_state.get("pending_restored_interval_set")
+    if pending_restore and st.session_state.applied_restored_interval_key != pending_restore.get("key"):
+        restored_intervals = normalize_interval_records(pending_restore.get("intervals", []), duration_s=float(duration_s))
+        st.session_state.intervals = restored_intervals
+        st.session_state.applied_restored_interval_key = pending_restore.get("key")
+        saved_sources = {
+            s.strip()
+            for s in str(pending_restore.get("source_files", "")).split(";")
+            if s.strip()
+        }
+        uploaded_sources = {up.name for up in uploaded}
+        missing_sources = sorted(saved_sources - uploaded_sources)
+        if missing_sources:
+            st.warning(
+                "Restored saved intervals, but these original source files are not currently uploaded: "
+                + ", ".join(missing_sources)
+            )
+        else:
+            st.success("Restored saved interval selections into the Waveform viewer. You can edit, remove, add, and re-save them.")
 
     records = []
     ecg_candidates = []
@@ -2773,7 +2893,6 @@ with viewer_tab:
     labeled_segments, labeled_stats = build_labeled_exports(aligned, st.session_state.intervals, analysis_signal_cols)
     labeled_stats = add_ecg_timing_metrics(labeled_stats, r_waves, r_wave_source_file, r_wave_source_signal)
     raw_labeled_segments = build_labeled_raw_segments(aligned, st.session_state.intervals, signal_cols)
-    labeled_visualizations_html = build_labeled_visualizations_html(raw_labeled_segments, patient_id, procedure_date)
 
     # Plot
     st.subheader("Waveform viewer with synchronized dual cursors")
@@ -2993,7 +3112,32 @@ with viewer_tab:
     if st.session_state.intervals:
         intervals_df = pd.DataFrame(st.session_state.intervals)
         intervals_df.insert(0, "interval_id", range(1, len(intervals_df) + 1))
-        st.dataframe(intervals_df, width="stretch")
+        edited_intervals_df = st.data_editor(
+            intervals_df,
+            width="stretch",
+            hide_index=True,
+            disabled=["interval_id"],
+            column_config={
+                "interval_id": st.column_config.NumberColumn("ID", width="small"),
+                "label": st.column_config.TextColumn("Label"),
+                "start_s": st.column_config.NumberColumn("Start (s)", min_value=0.0, max_value=float(duration_s), step=0.01, format="%.3f"),
+                "end_s": st.column_config.NumberColumn("End (s)", min_value=0.0, max_value=float(duration_s), step=0.01, format="%.3f"),
+            },
+            key=f"editable_intervals_{case_key}",
+        )
+
+        if st.button("Apply interval edits", width="stretch"):
+            edited_records = []
+            for _, row in edited_intervals_df.sort_values("interval_id").iterrows():
+                edited_records.append(
+                    {
+                        "label": row["label"],
+                        "start_s": float(row["start_s"]),
+                        "end_s": float(row["end_s"]),
+                    }
+                )
+            st.session_state.intervals = normalize_interval_records(edited_records, duration_s=float(duration_s))
+            st.rerun()
 
         remove_id = st.number_input("Interval ID to remove", min_value=1, max_value=len(st.session_state.intervals), value=1, step=1)
         if st.button("Remove selected interval"):
@@ -3047,7 +3191,6 @@ with viewer_tab:
         labeled_segments,
         labeled_stats,
         raw_labeled_segments,
-        labeled_visualizations_html,
         patient_id,
         procedure_date,
         notes,
@@ -3055,7 +3198,7 @@ with viewer_tab:
 
     st.caption(
         "Downloads one ZIP with the current selected segment, full aligned waveforms, labeled interval stats, "
-        "raw labeled waveform samples, visualization HTML, and case metadata."
+        "raw labeled waveform samples, and case metadata."
     )
     st.download_button(
         "Download export bundle",

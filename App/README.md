@@ -72,7 +72,6 @@ Recommended sharing path: upload `App/dist/Xper Hemodynamic Viewer-macOS.zip` as
 - `labeled_intervals_segments_long.csv`
 - `raw_labeled_waveform_segments_wide.csv`
 - `labeled_intervals_stats.csv`
-- `labeled_interval_visualizations.html`
 - `xper_hemo_export_bundle.zip`
 
 ## Local database
@@ -87,7 +86,7 @@ You can override this with an environment variable or Streamlit secret:
 
 The database uses one table, `labeled_interval_stats`, with one row per labeled interval per signal. It includes case metadata, source filenames, interval labels/timing, waveform statistics, morphology metrics, ECG timing metrics when available, and a save timestamp.
 
-Saved intervals also write raw waveform samples to `labeled_interval_segments`, with one row per time point per labeled interval and one column per mapped waveform channel. The Database tab can replay saved intervals visually from this table.
+Saved intervals also write raw waveform samples to `labeled_interval_segments`, with one row per time point per labeled interval and one column per mapped waveform channel. The Database tab can restore a saved interval set into the Waveform viewer after the matching PW6 files are uploaded, so prior shaded selections can be reviewed, edited, and saved again.
 
 ## Website deployment and password
 
@@ -197,7 +196,7 @@ Examples:
 - Keep ECG on its own mV axis
 
 
-## Raw segment export and visual replay added in v0.7.6
+## Raw segment export and saved-session restore added in v0.8.0
 
 Labeled intervals now export a wide-form raw waveform table for AI/ML workflows:
 
@@ -205,4 +204,4 @@ Labeled intervals now export a wide-form raw waveform table for AI/ML workflows:
 - Includes `interval_id`, `interval_label`, interval start/end, `relative_time_s`, original `time_s`, and all mapped waveform channels
 - Included in the ZIP bundle
 
-The app also creates `labeled_interval_visualizations.html`, a standalone interactive HTML file showing the saved labeled segments. When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too, and the Database tab can preview those saved segments later.
+When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
