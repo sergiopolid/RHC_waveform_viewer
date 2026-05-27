@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.1"
+APP_VERSION = "v0.8.2"
 APP_VERSION_DATE = "2026-05-27"
 
 
@@ -845,6 +845,40 @@ def asset_data_uri(relative_path: str, mime_type: str = "image/png") -> str:
     return f"data:{mime_type};base64,{data}"
 
 
+def render_institutional_header():
+    bwh_logo_uri = asset_data_uri("assets/bwh_logo.png", "image/png")
+    institution_logo_uri = asset_data_uri("assets/institution_logo.svg", "image/svg+xml")
+    logos = [
+        (bwh_logo_uri, "Brigham and Women's Hospital", "height: 48px; max-width: min(450px, 92vw);"),
+        (institution_logo_uri, "Institutional logo", "height: 54px; max-width: min(300px, 70vw);"),
+    ]
+    visible_logos = [(src, alt, style) for src, alt, style in logos if src]
+    if not visible_logos:
+        return
+
+    logo_html = "\n".join(
+        f'<img src="{src}" alt="{alt}" style="{style} width: auto; object-fit: contain;">'
+        for src, alt, style in visible_logos
+    )
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.25rem;
+            flex-wrap: wrap;
+            padding: 0.35rem 0 0.9rem;
+            margin-bottom: 0.25rem;
+            border-bottom: 1px solid rgba(49, 51, 63, 0.12);
+        ">
+            {logo_html}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def require_password_if_configured():
     expected_password = app_setting("APP_PASSWORD", "")
     if not expected_password:
@@ -857,6 +891,7 @@ def require_password_if_configured():
                 st.rerun()
         return
 
+    render_institutional_header()
     st.title("Hemodynamic RHC Viewer")
     st.caption("Enter the app password to continue.")
     entered_password = st.text_input("Password", type="password", key="app_password_entry")
@@ -2122,6 +2157,7 @@ st.set_page_config(page_title="Hemodynamic RHC Viewer", layout="wide")
 
 require_password_if_configured()
 
+render_institutional_header()
 st.title("Hemodynamic RHC Viewer")
 st.caption(
     "Upload Philips Xper .PW6 files, align EKG/pressure strips by time, select intervals with synchronized cursors, "
