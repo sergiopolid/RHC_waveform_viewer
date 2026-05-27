@@ -1,6 +1,6 @@
 # Philips Xper PW6 Hemodynamic Viewer v2
 
-This version adds synchronized dual cursors, patient/case metadata, automatic V-wave interval naming, V-wave morphology metrics, composite indices, ECG timing features, configurable ECG lead extraction, an in-app data dictionary tab, selectable waveform channel visibility, axis controls, and a local SQLite database for accumulated labeled interval statistics.
+This version adds synchronized dual cursors, patient/case metadata, automatic V-wave interval naming, pressure-channel interval segmentation, morphology metrics, composite indices, ECG timing features, configurable ECG lead extraction, an in-app data dictionary tab, selectable waveform channel visibility, axis controls, and a local SQLite database for accumulated labeled interval statistics.
 
 ## New features
 
@@ -14,7 +14,7 @@ This version adds synchronized dual cursors, patient/case metadata, automatic V-
 - Patient / Case ID, procedure date, and notes fields included in every exported CSV
 - Dedicated ECG files can be interpreted as D I / D II / D III sequential leads so leads are not concatenated into one trace
 - Automatic interval labels such as `PatientID_vwave_1`, `PatientID_vwave_2`, `PatientID_vwave_3`
-- Export labeled intervals:
+- Export labeled intervals across all mapped pressure channels:
   - long-format segment CSV
   - per-interval/per-signal stats CSV
   - ZIP bundle
@@ -106,7 +106,7 @@ Important persistence note: SQLite is a file on the machine/server running the a
 
 ## Morphology metrics added in v5
 
-For every selected or labeled interval, the stats CSV now includes morphology-focused metrics:
+For every selected or labeled interval, the stats CSV now includes morphology-focused metrics for each mapped pressure channel, such as RA, RV, PA, and PCWP/PW:
 
 - `raw_auc_to_zero`
 - `auc_above_start_baseline`
@@ -196,9 +196,9 @@ Examples:
 - Keep ECG on its own mV axis
 
 
-## Raw segment export and saved-session restore added in v0.8.0
+## Raw segment export and saved-session restore added in v0.8.1
 
-Labeled intervals now export a wide-form raw waveform table for AI/ML workflows:
+Labeled intervals now export pressure-channel statistics plus a wide-form raw waveform table for AI/ML workflows:
 
 - `raw_labeled_waveform_segments_wide.csv`
 - Includes `interval_id`, `interval_label`, interval start/end, `relative_time_s`, original `time_s`, and all mapped waveform channels

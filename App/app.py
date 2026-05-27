@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.0"
+APP_VERSION = "v0.8.1"
 APP_VERSION_DATE = "2026-05-27"
 
 
@@ -1289,23 +1289,30 @@ def add_ecg_timing_metrics(
     r_waves: pd.DataFrame,
     r_wave_source_file: str = "",
     r_wave_source_signal: str = "",
+    timing_signal_cols: list | None = None,
 ):
     """
     Add ECG timing metrics to stats table using detected R waves.
-    For each interval/signal row, relate the morphology peak to nearby R waves.
+    For matching interval/signal rows, relate the morphology peak to nearby R waves.
     """
     if stats.empty:
         return stats
 
     out = stats.copy()
+    timing_signal_set = set(timing_signal_cols or [])
+    if timing_signal_set and "signal" in out.columns:
+        timed_rows = out["signal"].isin(timing_signal_set)
+    else:
+        timed_rows = pd.Series(True, index=out.index)
+
     if r_waves.empty or "excess_peak_time_s" not in stats.columns:
         out["previous_r_time_s"] = np.nan
         out["next_r_time_s"] = np.nan
         out["qrs_to_excess_peak_ms"] = np.nan
         out["rr_cycle_length_ms"] = np.nan
         out["cycle_normalized_excess_peak_phase"] = np.nan
-        out["r_wave_source_file"] = r_wave_source_file
-        out["r_wave_source_signal"] = r_wave_source_signal
+        out["r_wave_source_file"] = np.where(timed_rows, r_wave_source_file, "")
+        out["r_wave_source_signal"] = np.where(timed_rows, r_wave_source_signal, "")
         return out
 
     r_times = r_waves["r_time_s"].to_numpy(float)
@@ -1317,6 +1324,14 @@ def add_ecg_timing_metrics(
     cycle_normalized_phase = []
 
     for _, row in out.iterrows():
+        if timing_signal_set and row.get("signal") not in timing_signal_set:
+            prev_r.append(np.nan)
+            next_r.append(np.nan)
+            qrs_to_peak_ms.append(np.nan)
+            cycle_length_ms.append(np.nan)
+            cycle_normalized_phase.append(np.nan)
+            continue
+
         peak_t = float(row["excess_peak_time_s"])
         before = r_times[r_times <= peak_t]
         after = r_times[r_times > peak_t]
@@ -1345,8 +1360,8 @@ def add_ecg_timing_metrics(
     out["qrs_to_excess_peak_ms"] = qrs_to_peak_ms
     out["rr_cycle_length_ms"] = cycle_length_ms
     out["cycle_normalized_excess_peak_phase"] = cycle_normalized_phase
-    out["r_wave_source_file"] = r_wave_source_file
-    out["r_wave_source_signal"] = r_wave_source_signal
+    out["r_wave_source_file"] = np.where(timed_rows, r_wave_source_file, "")
+    out["r_wave_source_signal"] = np.where(timed_rows, r_wave_source_signal, "")
     return out
 
 
@@ -1432,7 +1447,7 @@ def get_data_dictionary():
             "category": "Signal",
             "variable": "signal",
             "definition": "Waveform channel analyzed.",
-            "calculation": "Column name from aligned pressure data, normally PCWP_mmHg or a mapped PW/PCWP pressure channel.",
+            "calculation": "Column name from aligned pressure data, for example RA_mmHg, RV_mmHg, PA_mmHg, or PCWP_mmHg.",
             "units": "text",
             "interpretation": "Identifies the pressure signal used for interval morphology statistics.",
             "recommended_for_vwave_analysis": "Essential",
@@ -2711,7 +2726,7 @@ with viewer_tab:
     pcwp_signal_cols = [c for c in pressure_cols if "PCWP" in c.upper()]
     if not pcwp_signal_cols:
         pcwp_signal_cols = [c for c in pressure_cols if re.search(r"(^|_)PW(_|$)", c.upper())]
-    analysis_signal_cols = pcwp_signal_cols or pressure_cols
+    analysis_signal_cols = pressure_cols
 
     default_display_cols = signal_cols.copy()
     with st.expander("Channel visibility", expanded=False):
@@ -2727,12 +2742,12 @@ with viewer_tab:
         export_display_only = st.checkbox(
             "Export only displayed channels",
             value=False,
-            help="For full waveform export only. PCWP interval extraction remains PCWP-focused.",
+            help="For full waveform export only. Labeled interval statistics include all mapped pressure channels.",
         )
 
         st.caption(
-            "Interval extraction/statistics are PCWP-focused: "
-            + (", ".join(analysis_signal_cols) if analysis_signal_cols else "no PCWP channel is currently mapped")
+            "Interval extraction/statistics include all mapped pressure channels: "
+            + (", ".join(analysis_signal_cols) if analysis_signal_cols else "no pressure channel is currently mapped")
         )
 
     if not display_signal_cols:
@@ -2864,7 +2879,7 @@ with viewer_tab:
             st.info("No same-file EKG traces are available for lag QC.")
 
     # ECG timing features must use the ECG embedded in the PCWP/PW pressure PW6 file.
-    r_wave_pressure_col, r_wave_source = pcwp_r_wave_source(analysis_signal_cols, same_file_ecg_by_pressure_col)
+    r_wave_pressure_col, r_wave_source = pcwp_r_wave_source(pcwp_signal_cols, same_file_ecg_by_pressure_col)
     if r_wave_source is not None:
         r_waves = detect_r_waves(aligned["time_s"].to_numpy(), r_wave_source["values"])
         r_wave_source_file = r_wave_source["filename"]
@@ -2888,10 +2903,10 @@ with viewer_tab:
     lo, hi = sorted([float(cursor_start), float(cursor_end)])
     segment = get_segment(aligned, cursor_start, cursor_end)
     stats = calculate_stats(segment, analysis_signal_cols)
-    stats = add_ecg_timing_metrics(stats, r_waves, r_wave_source_file, r_wave_source_signal)
+    stats = add_ecg_timing_metrics(stats, r_waves, r_wave_source_file, r_wave_source_signal, timing_signal_cols=pcwp_signal_cols)
 
     labeled_segments, labeled_stats = build_labeled_exports(aligned, st.session_state.intervals, analysis_signal_cols)
-    labeled_stats = add_ecg_timing_metrics(labeled_stats, r_waves, r_wave_source_file, r_wave_source_signal)
+    labeled_stats = add_ecg_timing_metrics(labeled_stats, r_waves, r_wave_source_file, r_wave_source_signal, timing_signal_cols=pcwp_signal_cols)
     raw_labeled_segments = build_labeled_raw_segments(aligned, st.session_state.intervals, signal_cols)
 
     # Plot
@@ -3212,7 +3227,7 @@ with viewer_tab:
     st.subheader("Notes")
     st.markdown(
         """
-    - Cursor A/B are synchronized across all panels, so you can select a PCWP feature using a specific EKG timing reference.
+    - Cursor A/B are synchronized across all panels, so the same labeled interval can segment RA, RV, PA, PCWP, and any other mapped pressure channel.
     - Labels are interval-based. By default, the app auto-generates labels like `PatientID_vwave_1`, `PatientID_vwave_2`, `PatientID_vwave_3`.
     - You can turn off auto-naming to manually enter labels such as `End-expiratory wedge` or `artifact`.
     - Exported labeled segments are in long format: one row per time point per signal per interval.
@@ -3221,7 +3236,7 @@ with viewer_tab:
     - `raw_auc_to_zero` is preserved, but the preferred morphology metric is `excess_auc_linear_baseline_positive`.
     - `excess_auc_linear_baseline_positive` is the area above the straight line connecting interval start and interval end.
     - Composite indices added for group comparisons: `vwave_sharpness_index`, `area_density_index`, `relative_vwave_amplitude`, `vwave_burden_ratio`, and `slope_area_ratio`.
-    - ECG timing metrics are added when R waves are detected: `qrs_to_excess_peak_ms` and `cycle_normalized_excess_peak_phase`.
+    - ECG timing metrics are added to PCWP/PW rows when same-file R waves are detected: `qrs_to_excess_peak_ms` and `cycle_normalized_excess_peak_phase`.
     - AUC uses a NumPy trapezoid compatibility helper for older and newer NumPy versions.
     - This remains a reverse-engineered parser and should be validated against official Xper/PDF exports.
     """
