@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.9"
+APP_VERSION = "v0.8.10"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -1325,12 +1325,19 @@ def interpolate_rv_pmax_half_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start:
     }
 
 
-def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray, r_wave_times: np.ndarray | None = None):
+def rv_single_beat_derivative_analysis(
+    time_s: np.ndarray,
+    pressure: np.ndarray,
+    r_wave_times: np.ndarray | None = None,
+    stroke_volume_ml: float | None = None,
+    edv_ml: float | None = None,
+):
     """
     Beat-level visual feature detection for the Bellofiore RV single-beat methods.
     Consecutive R waves define each beat window. Within each QRS-to-QRS window,
-    identify dP/dt extrema, estimate a first-derivative Piso sine interpolation, and find
-    candidate second-derivative minima. This does not yet calculate final Ees.
+    identify dP/dt extrema, estimate a first-derivative Piso/Pmax half-sine
+    interpolation, find candidate second-derivative minima, and optionally calculate
+    single-beat Ees/Ea when SV and EDV are supplied.
     """
     t = np.asarray(time_s, dtype=float)
     p = np.asarray(pressure, dtype=float)
@@ -1390,6 +1397,8 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
     events = []
     fit_parts = []
     sample_parts = []
+    sv_ml = float(stroke_volume_ml) if stroke_volume_ml is not None and np.isfinite(stroke_volume_ml) and stroke_volume_ml > 0 else None
+    edv_value_ml = float(edv_ml) if edv_ml is not None and np.isfinite(edv_ml) and edv_ml > 0 else None
     beat_id = 0
     for beat_start, beat_end in zip(r_times[:-1], r_times[1:]):
         rr_s = float(beat_end - beat_start)
@@ -1482,6 +1491,11 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
             selected_minima.append(("PV opening candidate", min(opening_candidates, key=lambda i: d2pdt2[i])))
         if closing_candidates:
             selected_minima.append(("PV closing candidate", min(closing_candidates, key=lambda i: d2pdt2[i])))
+        closing_idx = next((idx for label, idx in selected_minima if label == "PV closing candidate"), dpdt_min_idx)
+        ivo_time_s = float(t_ok[dpdt_max_idx])
+        ivc_time_s = float(t_ok[closing_idx])
+        pes_mmHg = float(p_smooth[closing_idx])
+        pes_time_s = ivc_time_s
 
         ic_threshold = 0.20 * float(dpdt[dpdt_max_idx])
         ic_candidates = beat_indices[(beat_indices <= dpdt_max_idx) & (dpdt[beat_indices] >= ic_threshold)]
@@ -1506,6 +1520,15 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
             min_pmax=min_pmax,
         )
         if fit_result is not None:
+            ees_mmHg_per_ml = np.nan
+            ea_mmHg_per_ml = np.nan
+            va_coupling = np.nan
+            if sv_ml is not None:
+                ea_mmHg_per_ml = pes_mmHg / sv_ml
+                if edv_value_ml is not None and edv_value_ml > sv_ml:
+                    ees_mmHg_per_ml = (float(fit_result["pmax_mmHg"]) - pes_mmHg) / (edv_value_ml - sv_ml)
+                    if np.isfinite(ees_mmHg_per_ml) and np.isfinite(ea_mmHg_per_ml) and ea_mmHg_per_ml > 0:
+                        va_coupling = ees_mmHg_per_ml / ea_mmHg_per_ml
             ic_fit_indices = np.flatnonzero((t_ok >= t_ok[ic_onset_idx]) & (t_ok <= t_ok[dpdt_max_idx]))
             ir_fit_indices = np.flatnonzero((t_ok >= t_ok[dpdt_min_idx]) & (t_ok <= t_ok[ir_end_idx]))
             sample_parts.append(
@@ -1528,6 +1551,15 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
                     "pmax_mmHg": fit_result["pmax_mmHg"],
                     "piso_mmHg": fit_result["piso_mmHg"],
                     "piso_margin_mmHg": fit_result["piso_mmHg"] - measured_peak,
+                    "ivo_time_s": ivo_time_s,
+                    "ivc_time_s": ivc_time_s,
+                    "pes_mmHg": pes_mmHg,
+                    "pes_time_s": pes_time_s,
+                    "stroke_volume_ml": sv_ml if sv_ml is not None else np.nan,
+                    "edv_ml": edv_value_ml if edv_value_ml is not None else np.nan,
+                    "ees_mmHg_per_ml": ees_mmHg_per_ml,
+                    "ea_mmHg_per_ml": ea_mmHg_per_ml,
+                    "va_coupling_ees_over_ea": va_coupling,
                     "piso_time_s": fit_result["piso_time_s"],
                     "t_offset_s": fit_result["t_offset_s"],
                     "t_sys_s": fit_result["t_sys_s"],
@@ -1555,6 +1587,33 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
                         "value": float(p_smooth[ir_end_idx]),
                         "row": "rv_peak_fit",
                         "description": "End of IR interpolation range",
+                    },
+                    {
+                        **base_event,
+                        "event": "IVO estimate",
+                        "method": "Single-beat landmark",
+                        "time_s": ivo_time_s,
+                        "value": float(p_smooth[dpdt_max_idx]),
+                        "row": "rv_peak_fit",
+                        "description": "Isovolumic contraction end estimated at dP/dt max",
+                    },
+                    {
+                        **base_event,
+                        "event": "IVC estimate",
+                        "method": "Single-beat landmark",
+                        "time_s": ivc_time_s,
+                        "value": pes_mmHg,
+                        "row": "rv_peak_fit",
+                        "description": "Isovolumic relaxation start estimated at PV closing candidate; falls back to dP/dt min if needed",
+                    },
+                    {
+                        **base_event,
+                        "event": "Pes estimate",
+                        "method": "End-systolic pressure",
+                        "time_s": pes_time_s,
+                        "value": pes_mmHg,
+                        "row": "rv_peak_fit",
+                        "description": "End-systolic pressure at PV closing candidate; falls back to dP/dt min if closing candidate is unavailable",
                     },
                     {
                         **base_event,
@@ -2883,6 +2942,29 @@ with viewer_tab:
         procedure_date = st.text_input("Procedure date", value="", key=f"procedure_date_{case_key}").strip()
         notes = st.text_area("Notes", value="", height=80, key=f"notes_{case_key}")
 
+        with st.expander("RV single-beat inputs", expanded=False):
+            st.caption("Optional. Used only to calculate Ees, Ea, and Ees/Ea from RV Pmax/Piso and Pes.")
+            rv_stroke_volume_input = st.number_input(
+                "Stroke volume (mL)",
+                min_value=0.0,
+                max_value=300.0,
+                value=0.0,
+                step=1.0,
+                key=f"rv_stroke_volume_ml_{case_key}",
+                help="Enter stroke volume from Fick, thermodilution, or another source. Leave 0 to skip Ees/Ea.",
+            )
+            rv_edv_input = st.number_input(
+                "RV EDV (mL)",
+                min_value=0.0,
+                max_value=500.0,
+                value=0.0,
+                step=1.0,
+                key=f"rv_edv_ml_{case_key}",
+                help="Enter RV end-diastolic volume from imaging or a chosen assumption. Must be greater than stroke volume to calculate Ees.",
+            )
+        rv_stroke_volume_ml = float(rv_stroke_volume_input) if rv_stroke_volume_input > 0 else None
+        rv_edv_ml = float(rv_edv_input) if rv_edv_input > 0 else None
+
         st.header("Database")
         st.session_state.database_path = st.text_input(
             "SQLite database file",
@@ -3441,6 +3523,8 @@ with viewer_tab:
                     aligned["time_s"].to_numpy(float),
                     aligned[pressure_col].to_numpy(float),
                     rv_r_waves["r_time_s"].to_numpy(float),
+                    stroke_volume_ml=rv_stroke_volume_ml,
+                    edv_ml=rv_edv_ml,
                 )
                 if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
                     rv_derivative_analysis = None
@@ -3533,6 +3617,21 @@ with viewer_tab:
                         marker=dict(color="rgb(220, 38, 38)", size=8, symbol="triangle-up"),
                         hovertemplate="Beat %{customdata}: measured RV peak<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
                         customdata=measured_peaks["beat_id"],
+                    ),
+                    row=peak_fit_row,
+                    col=1,
+                )
+            pes_events = peak_events[peak_events["event"] == "Pes estimate"]
+            if not pes_events.empty:
+                fig.add_trace(
+                    go.Scatter(
+                        x=pes_events["time_s"],
+                        y=pes_events["value"],
+                        mode="markers",
+                        name="Pes estimate",
+                        marker=dict(color="rgb(14, 116, 144)", size=9, symbol="square"),
+                        hovertemplate="Beat %{customdata}: Pes estimate<br>Time: %{x:.3f} s<br>Pes: %{y:.2f} mmHg<extra></extra>",
+                        customdata=pes_events["beat_id"],
                     ),
                     row=peak_fit_row,
                     col=1,
@@ -3692,18 +3791,49 @@ with viewer_tab:
             st.caption(
                 "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
                 "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
-                "The RV peak/Piso row marks measured RV peaks, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the half-sine isovolumic interpolation used to estimate Pmax/Piso. "
+                "The RV peak/Piso row marks measured RV peaks, Pes at the PV closing candidate, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the half-sine isovolumic interpolation used to estimate Pmax/Piso. "
                 f"Beat windows use the same-file RV ECG lead {rv_r_wave_source_signal or source_ecg.get('ecg_col', '')}. "
-                "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
+                "Ees, Ea, and Ees/Ea are shown only when stroke volume and EDV are entered."
             )
             if not rv_fits.empty:
                 fit_summary = (
-                    rv_fits[["beat_id", "measured_peak_mmHg", "pmax_mmHg", "piso_margin_mmHg", "piso_time_s", "t_offset_s", "t_sys_s", "fit_rmse_mmHg", "fit_n"]]
+                    rv_fits[
+                        [
+                            "beat_id",
+                            "measured_peak_mmHg",
+                            "pmax_mmHg",
+                            "pes_mmHg",
+                            "piso_margin_mmHg",
+                            "ivo_time_s",
+                            "ivc_time_s",
+                            "piso_time_s",
+                            "t_offset_s",
+                            "t_sys_s",
+                            "fit_rmse_mmHg",
+                            "fit_n",
+                        ]
+                    ]
                     .drop_duplicates()
                     .sort_values("beat_id")
                 )
                 with st.expander("RV Pmax/Piso half-sine interpolation summary", expanded=False):
                     st.dataframe(fit_summary, width="stretch", hide_index=True)
+                mechanics_cols = [
+                    "beat_id",
+                    "pmax_mmHg",
+                    "pes_mmHg",
+                    "stroke_volume_ml",
+                    "edv_ml",
+                    "ees_mmHg_per_ml",
+                    "ea_mmHg_per_ml",
+                    "va_coupling_ees_over_ea",
+                ]
+                mechanics_summary = rv_fits[mechanics_cols].drop_duplicates().sort_values("beat_id")
+                if mechanics_summary[["ees_mmHg_per_ml", "ea_mmHg_per_ml", "va_coupling_ees_over_ea"]].notna().any().any():
+                    with st.expander("RV single-beat mechanics", expanded=True):
+                        st.dataframe(mechanics_summary, width="stretch", hide_index=True)
+                elif rv_stroke_volume_ml is not None or rv_edv_ml is not None:
+                    st.info("Enter both stroke volume and RV EDV, with EDV greater than stroke volume, to calculate Ees and Ees/Ea. Ea needs stroke volume.")
             with st.expander("RV derivative feature times", expanded=False):
                 st.dataframe(
                     rv_events[["beat_id", "method", "event", "rr_start_s", "rr_end_s", "rr_duration_s", "time_s", "value", "description"]],

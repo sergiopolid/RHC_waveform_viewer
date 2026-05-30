@@ -207,16 +207,22 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative and Piso display updated in v0.8.9
+## RV derivative and Piso display updated in v0.8.10
 
 RV pressure panels include additional rows for visual review of single-beat method landmarks. The app uses detected R waves from the ECG embedded in the same RV PW6 file to analyze each QRS-to-QRS beat separately:
 
-- RV beat peaks and half-sine `Pmax/Piso` interpolation: smoothed RV pressure, measured RV peak, IC/IR samples used for interpolation, 20% dP/dt interpolation limits, half-sine isovolumic curve, and `Piso` marker
+- RV beat peaks and half-sine `Pmax/Piso` interpolation: smoothed RV pressure, measured RV peak, `Pes`, IC/IR samples used for interpolation, 20% dP/dt interpolation limits, half-sine isovolumic curve, and `Piso` marker
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 - Second derivative method: RV `d2P/dt2`, with candidate pulmonic valve opening and closing minima
 
-This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It estimates visual `Pmax/Piso` candidates using `Pmax * sin(pi * (t - t_offset) / Tsys)` but does not yet calculate final validated `Ees` or coupling values.
+This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It estimates visual `Pmax/Piso` candidates using `Pmax * sin(pi * (t - t_offset) / Tsys)`. `IVO` is estimated at `dP/dt max`; `IVC` and `Pes` are estimated at the pulmonic valve closing candidate, falling back to `dP/dt min` if needed.
 
 `Piso` candidates are constrained to sit above the measured RV pressure peak for that beat. If the sine interpolation cannot satisfy that physiologic requirement, the app skips that candidate rather than displaying a misleading low fitted peak.
+
+Optional sidebar inputs for stroke volume and RV EDV enable single-beat mechanics:
+
+- `Ees = (Pmax - Pes) / (EDV - SV)` when EDV is greater than SV
+- `Ea = Pes / SV` when SV is supplied
+- `Ees/Ea` when both Ees and Ea are available
 
 The RV beat-window detector tries each ECG lead embedded in the RV file and reports which lead was used. It does not use the global selected ECG or another pressure strip's ECG for RV beat windows.
