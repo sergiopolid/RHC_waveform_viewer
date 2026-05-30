@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.10"
+APP_VERSION = "v0.8.11"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -1066,6 +1066,17 @@ def is_rv_signal(label_or_col: str, filename: str = "") -> bool:
     return bool(re.search(r"(^|[^A-Z])RV([^A-Z]|$)", text) or "WAV_004" in text)
 
 
+def is_mapped_rv_pressure(pressure_col: str, source_record: dict | None = None) -> bool:
+    """
+    RV-only analysis must follow the user-corrected channel mapping, not filename guesses.
+    This prevents RA/PA channels from receiving RV-only derivative/Pmax panels when WAV
+    numbering is inconsistent.
+    """
+    mapped_label = str((source_record or {}).get("label", "")).upper()
+    col_label = pressure_col.replace("_mmHg", "").split("_")[0].upper()
+    return mapped_label == "RV" or col_label == "RV"
+
+
 def is_reference_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png"}
 
@@ -1240,41 +1251,45 @@ def interpolate_rv_pmax_half_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start:
     fit_duration = max(float(t_end - t_start), 1e-3)
     min_pmax = float(min_pmax) if min_pmax is not None and np.isfinite(min_pmax) else None
 
-    def half_sine_model(t, pmax, t_offset, t_sys):
-        return pmax * np.sin(np.pi * (t - t_offset) / t_sys)
+    def half_sine_model(t, p_base, amp, t_offset, t_sys):
+        return p_base + amp * np.sin(np.pi * (t - t_offset) / t_sys)
 
     pressure_peak_guess = max(float(np.nanmax(p_fit)), min_pmax or 0.0)
-    pmax_lower = max(pressure_peak_guess, min_pmax or 0.0, 1.0)
-    pmax_upper = max(300.0, pmax_lower * 2.5)
+    base0 = max(float(np.nanmin(p_fit)), -50.0)
+    amp_lower = max(pressure_peak_guess - base0, (min_pmax or pressure_peak_guess) - base0, 1.0)
+    amp_upper = max(300.0, amp_lower * 2.5)
     t_offset_lower = float(t_start - max(0.35, 0.60 * fit_duration))
     t_offset_upper = float(t_start)
     t_sys_lower = max(0.12, 0.80 * fit_duration)
     t_sys_upper = max(0.80, 2.20 * fit_duration)
-    lower_bounds = np.array([pmax_lower, t_offset_lower, t_sys_lower])
-    upper_bounds = np.array([pmax_upper, t_offset_upper, t_sys_upper])
+    lower_bounds = np.array([-50.0, amp_lower, t_offset_lower, t_sys_lower])
+    upper_bounds = np.array([100.0, amp_upper, t_offset_upper, t_sys_upper])
 
     def objective(params):
-        pmax, t_offset, t_sys = params
-        residuals = half_sine_model(t_fit, pmax, t_offset, t_sys) - p_fit
+        p_base, amp, t_offset, t_sys = params
+        residuals = half_sine_model(t_fit, p_base, amp, t_offset, t_sys) - p_fit
         penalties = []
         if t_offset + t_sys < t_end:
-            penalties.append((t_end - (t_offset + t_sys)) * pmax * 5.0)
+            penalties.append((t_end - (t_offset + t_sys)) * max(amp, 1.0) * 5.0)
+        if min_pmax is not None and p_base + amp < min_pmax:
+            penalties.append((min_pmax - (p_base + amp)) * 8.0)
         phase = np.pi * (t_fit - t_offset) / t_sys
         outside = (phase < 0.0) | (phase > np.pi)
         if np.any(outside):
-            penalties.extend(np.repeat(pmax * 0.5, int(np.sum(outside))))
+            penalties.extend(np.repeat(max(amp, 1.0) * 0.5, int(np.sum(outside))))
         return np.concatenate([residuals, np.asarray(penalties, dtype=float)]) if penalties else residuals
 
     candidate_params = []
-    for p_scale in (1.0, 1.25, 1.5, 1.8):
-        for offset_shift in (0.00, 0.05, 0.10, 0.15):
-            for sys_scale in (1.1, 1.35, 1.6, 1.9):
-                candidate_params.append([
-                    pmax_lower * p_scale,
-                    float(t_start - offset_shift),
-                    max(fit_duration * sys_scale, t_sys_lower),
-                ])
-
+    for base_shift in (-5.0, 0.0, 5.0):
+        for amp_scale in (1.0, 1.25, 1.5, 1.8):
+            for offset_shift in (0.00, 0.05, 0.10, 0.15):
+                for sys_scale in (1.1, 1.35, 1.6, 1.9):
+                    candidate_params.append([
+                        base0 + base_shift,
+                        amp_lower * amp_scale,
+                        float(t_start - offset_shift),
+                        max(fit_duration * sys_scale, t_sys_lower),
+                    ])
     best = None
     best_score = np.inf
     for initial in candidate_params:
@@ -1290,10 +1305,13 @@ def interpolate_rv_pmax_half_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start:
             continue
         if not result.success:
             continue
-        pmax, t_offset, t_sys = result.x
+        p_base, amp, t_offset, t_sys = result.x
         if t_offset + t_sys < t_end:
             continue
-        y_candidate = half_sine_model(t_fit, pmax, t_offset, t_sys)
+        pmax = float(p_base + amp)
+        if min_pmax is not None and pmax < min_pmax:
+            continue
+        y_candidate = half_sine_model(t_fit, p_base, amp, t_offset, t_sys)
         if not np.isfinite(y_candidate).any():
             continue
         score = float(np.nanmean((y_candidate - p_fit) ** 2))
@@ -1304,37 +1322,92 @@ def interpolate_rv_pmax_half_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start:
     if best is None:
         return None
 
-    pmax, t_offset, t_sys = [float(v) for v in best]
+    p_base, amp, t_offset, t_sys = [float(v) for v in best]
+    pmax = p_base + amp
     t_curve = np.linspace(t_offset, t_offset + t_sys, 240)
-    y_curve = half_sine_model(t_curve, pmax, t_offset, t_sys)
+    y_curve = half_sine_model(t_curve, p_base, amp, t_offset, t_sys)
     if not np.isfinite(y_curve).any():
         return None
     peak_idx = int(np.nanargmax(y_curve))
-    residuals = p_fit - half_sine_model(t_fit, pmax, t_offset, t_sys)
+    residuals = p_fit - half_sine_model(t_fit, p_base, amp, t_offset, t_sys)
     rmse = float(np.sqrt(np.nanmean(residuals ** 2))) if len(residuals) else np.nan
     return {
         "time_s": t_curve,
         "pressure_mmHg": y_curve,
-        "pmax_mmHg": pmax,
-        "piso_mmHg": pmax,
+        "pmax_mmHg": float(pmax),
+        "piso_mmHg": float(pmax),
         "piso_time_s": float(t_curve[peak_idx]),
-        "t_offset_s": t_offset,
-        "t_sys_s": t_sys,
+        "p_base_mmHg": float(p_base),
+        "t_offset_s": float(t_offset),
+        "t_sys_s": float(t_sys),
         "fit_rmse_mmHg": rmse,
         "fit_n": int(len(t_fit)),
     }
 
 
+def rv_pressure_beat_windows(t_ok: np.ndarray, p_smooth: np.ndarray, dt: float):
+    try:
+        from scipy.signal import find_peaks
+    except Exception:
+        return []
+
+    if len(t_ok) < 20:
+        return []
+    p_range = float(np.nanpercentile(p_smooth, 95) - np.nanpercentile(p_smooth, 5))
+    if not np.isfinite(p_range) or p_range <= 0:
+        return []
+
+    min_distance = max(1, int(round(0.70 / dt)))
+    min_height = float(np.nanpercentile(p_smooth, 5) + 0.45 * p_range)
+    prominence = max(2.5, 0.25 * p_range, float(np.nanstd(p_smooth)) * 0.50)
+    peaks, props = find_peaks(p_smooth, distance=min_distance, prominence=prominence, height=min_height)
+    if len(peaks) < 2:
+        peaks, props = find_peaks(
+            p_smooth,
+            distance=max(1, int(round(0.60 / dt))),
+            prominence=max(1.5, 0.18 * p_range),
+            height=float(np.nanpercentile(p_smooth, 5) + 0.35 * p_range),
+        )
+    if len(peaks) == 0:
+        return []
+
+    peaks = np.asarray(peaks, dtype=int)
+    peak_times = t_ok[peaks]
+    if len(peaks) >= 2:
+        median_period = float(np.nanmedian(np.diff(peak_times)))
+    else:
+        median_period = 0.9
+    if not np.isfinite(median_period) or median_period <= 0:
+        median_period = 0.9
+
+    bounds = []
+    for i, peak_idx in enumerate(peaks):
+        if i == 0:
+            start_t = max(float(t_ok[0]), float(peak_times[i] - 0.55 * median_period))
+        else:
+            start_t = float((peak_times[i - 1] + peak_times[i]) / 2.0)
+        if i == len(peaks) - 1:
+            end_t = min(float(t_ok[-1]), float(peak_times[i] + 0.55 * median_period))
+        else:
+            end_t = float((peak_times[i] + peak_times[i + 1]) / 2.0)
+        if end_t - start_t < 0.35 or end_t - start_t > 1.80:
+            continue
+        beat_indices = np.flatnonzero((t_ok >= start_t) & (t_ok < end_t))
+        if len(beat_indices) < 12:
+            continue
+        bounds.append((start_t, end_t, int(peak_idx), beat_indices))
+    return bounds
+
+
 def rv_single_beat_derivative_analysis(
     time_s: np.ndarray,
     pressure: np.ndarray,
-    r_wave_times: np.ndarray | None = None,
     stroke_volume_ml: float | None = None,
     edv_ml: float | None = None,
 ):
     """
     Beat-level visual feature detection for the Bellofiore RV single-beat methods.
-    Consecutive R waves define each beat window. Within each QRS-to-QRS window,
+    RV pressure peaks define each beat window. Within each pressure-beat window,
     identify dP/dt extrema, estimate a first-derivative Piso/Pmax half-sine
     interpolation, find candidate second-derivative minima, and optionally calculate
     single-beat Ees/Ea when SV and EDV are supplied.
@@ -1388,10 +1461,8 @@ def rv_single_beat_derivative_analysis(
         }
     )
 
-    r_times = np.asarray([] if r_wave_times is None else r_wave_times, dtype=float)
-    r_times = np.sort(r_times[np.isfinite(r_times)])
-    r_times = r_times[(r_times >= t_ok[0]) & (r_times <= t_ok[-1])]
-    if len(r_times) < 2:
+    pressure_beat_windows = rv_pressure_beat_windows(t_ok, p_smooth, float(dt))
+    if not pressure_beat_windows:
         return derivative_df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     events = []
@@ -1400,19 +1471,10 @@ def rv_single_beat_derivative_analysis(
     sv_ml = float(stroke_volume_ml) if stroke_volume_ml is not None and np.isfinite(stroke_volume_ml) and stroke_volume_ml > 0 else None
     edv_value_ml = float(edv_ml) if edv_ml is not None and np.isfinite(edv_ml) and edv_ml > 0 else None
     beat_id = 0
-    for beat_start, beat_end in zip(r_times[:-1], r_times[1:]):
-        rr_s = float(beat_end - beat_start)
-        if rr_s < 0.40 or rr_s > 1.80:
-            continue
-
-        beat_mask = (t_ok >= beat_start) & (t_ok < beat_end)
-        beat_indices = np.flatnonzero(beat_mask)
-        if len(beat_indices) < 12:
-            continue
-
+    for beat_start, beat_end, pressure_peak_idx, beat_indices in pressure_beat_windows:
+        beat_duration_s = float(beat_end - beat_start)
         beat_id += 1
-        pressure_peak_idx = int(beat_indices[np.nanargmax(p_smooth[beat_indices])])
-        early_indices = beat_indices[t_ok[beat_indices] <= beat_start + 0.65 * rr_s]
+        early_indices = beat_indices[t_ok[beat_indices] <= beat_start + 0.65 * beat_duration_s]
         if len(early_indices) < 4:
             early_indices = beat_indices
         late_indices = beat_indices[t_ok[beat_indices] >= t_ok[pressure_peak_idx]]
@@ -1424,9 +1486,9 @@ def rv_single_beat_derivative_analysis(
 
         base_event = {
             "beat_id": beat_id,
-            "rr_start_s": float(beat_start),
-            "rr_end_s": float(beat_end),
-            "rr_duration_s": rr_s,
+            "beat_start_s": float(beat_start),
+            "beat_end_s": float(beat_end),
+            "beat_duration_s": beat_duration_s,
         }
         events.extend(
             [
@@ -1437,7 +1499,7 @@ def rv_single_beat_derivative_analysis(
                     "time_s": float(t_ok[pressure_peak_idx]),
                     "value": float(p_smooth[pressure_peak_idx]),
                     "row": "rv_peak_fit",
-                    "description": "Measured RV pressure peak within QRS-to-QRS beat",
+                    "description": "Measured RV pressure peak within pressure-derived beat window",
                 },
                 {
                     **base_event,
@@ -1550,6 +1612,7 @@ def rv_single_beat_derivative_analysis(
                     "measured_peak_mmHg": measured_peak,
                     "pmax_mmHg": fit_result["pmax_mmHg"],
                     "piso_mmHg": fit_result["piso_mmHg"],
+                    "p_base_mmHg": fit_result["p_base_mmHg"],
                     "piso_margin_mmHg": fit_result["piso_mmHg"] - measured_peak,
                     "ivo_time_s": ivo_time_s,
                     "ivc_time_s": ivc_time_s,
@@ -3508,26 +3571,17 @@ with viewer_tab:
             ecg_values = aligned[ecg_col]
             ecg_name = f"EKG reference for {pressure_label}"
 
-        rv_r_waves = pd.DataFrame()
         rv_derivative_analysis = None
-        rv_r_wave_source_signal = ""
-        rv_same_file_ecg_available = source_ecg is not None
-        if is_rv_signal(pressure_col, source_record.get("filename", "")):
-            if source_ecg is not None:
-                rv_r_waves, rv_r_wave_source_signal = detect_r_waves_from_ecg_source(
-                    aligned["time_s"].to_numpy(float),
-                    source_ecg,
-                )
-            if not rv_r_waves.empty:
-                rv_derivative_analysis = rv_single_beat_derivative_analysis(
-                    aligned["time_s"].to_numpy(float),
-                    aligned[pressure_col].to_numpy(float),
-                    rv_r_waves["r_time_s"].to_numpy(float),
-                    stroke_volume_ml=rv_stroke_volume_ml,
-                    edv_ml=rv_edv_ml,
-                )
-                if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
-                    rv_derivative_analysis = None
+        is_rv_pressure = is_mapped_rv_pressure(pressure_col, source_record)
+        if is_rv_pressure:
+            rv_derivative_analysis = rv_single_beat_derivative_analysis(
+                aligned["time_s"].to_numpy(float),
+                aligned[pressure_col].to_numpy(float),
+                stroke_volume_ml=rv_stroke_volume_ml,
+                edv_ml=rv_edv_ml,
+            )
+            if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
+                rv_derivative_analysis = None
 
         plot_rows = 2 if ecg_values is not None else 1
         subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
@@ -3775,24 +3829,16 @@ with viewer_tab:
 
         decorate_waveform_figure(fig, bottom_row=plot_rows)
         st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
-        if is_rv_signal(pressure_col, source_record.get("filename", "")) and rv_derivative_analysis is None:
-            if rv_same_file_ecg_available:
-                st.warning(
-                    "RV derivative landmarks need QRS-to-QRS beat windows from the ECG embedded in the same RV PW6 file. "
-                    "No reliable R waves were detected in that RV same-file ECG, so beat-level dP/dt and d2P/dt2 markers were not added."
-                )
-            else:
-                st.warning(
-                    "RV derivative landmarks need the ECG embedded in the same RV PW6 file. A displayed fallback ECG may be visible, "
-                    "but it was not used for RV beat windows because it may come from a different strip."
-                )
+        if is_rv_pressure and rv_derivative_analysis is None:
+            st.warning(
+                "RV pressure-derived beat windows could not be identified reliably, so the RV-only derivative/Pmax panels were not added."
+            )
         elif rv_derivative_analysis is not None:
             _, rv_events, rv_fits, _ = rv_derivative_analysis
             st.caption(
-                "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
+                "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
                 "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
                 "The RV peak/Piso row marks measured RV peaks, Pes at the PV closing candidate, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the half-sine isovolumic interpolation used to estimate Pmax/Piso. "
-                f"Beat windows use the same-file RV ECG lead {rv_r_wave_source_signal or source_ecg.get('ecg_col', '')}. "
                 "Ees, Ea, and Ees/Ea are shown only when stroke volume and EDV are entered."
             )
             if not rv_fits.empty:
@@ -3803,6 +3849,7 @@ with viewer_tab:
                             "measured_peak_mmHg",
                             "pmax_mmHg",
                             "pes_mmHg",
+                            "p_base_mmHg",
                             "piso_margin_mmHg",
                             "ivo_time_s",
                             "ivc_time_s",
@@ -3835,8 +3882,19 @@ with viewer_tab:
                 elif rv_stroke_volume_ml is not None or rv_edv_ml is not None:
                     st.info("Enter both stroke volume and RV EDV, with EDV greater than stroke volume, to calculate Ees and Ees/Ea. Ea needs stroke volume.")
             with st.expander("RV derivative feature times", expanded=False):
+                event_cols = [
+                    "beat_id",
+                    "method",
+                    "event",
+                    "beat_start_s",
+                    "beat_end_s",
+                    "beat_duration_s",
+                    "time_s",
+                    "value",
+                    "description",
+                ]
                 st.dataframe(
-                    rv_events[["beat_id", "method", "event", "rr_start_s", "rr_end_s", "rr_duration_s", "time_s", "value", "description"]],
+                    rv_events[[col for col in event_cols if col in rv_events.columns]],
                     width="stretch",
                     hide_index=True,
                 )
