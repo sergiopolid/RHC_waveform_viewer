@@ -1,11 +1,12 @@
 # Philips Xper PW6 Hemodynamic Viewer v2
 
-This version adds synchronized dual cursors, patient/case metadata, automatic V-wave interval naming, pressure-channel interval segmentation, morphology metrics, composite indices, ECG timing features, configurable ECG lead extraction, an in-app data dictionary tab, selectable waveform channel visibility, axis controls, and a local SQLite database for accumulated labeled interval statistics.
+This version adds synchronized dual cursors, patient/case metadata, automatic V-wave interval naming, pressure-channel interval segmentation, RV derivative feature display for single-beat method review, morphology metrics, composite indices, ECG timing features, configurable ECG lead extraction, an in-app data dictionary tab, selectable waveform channel visibility, axis controls, and a local SQLite database for accumulated labeled interval statistics.
 
 ## New features
 
 - Dual synchronized cursors visible across all waveform panels
 - Active selected frame shaded in all panels
+- RV waveform panels include dP/dt and d2P/dt2 derivative rows with candidate single-beat method feature markers
 - Label interval windows such as:
   - V wave 1
   - V wave 2
@@ -205,3 +206,12 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 - Included in the ZIP bundle
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
+
+## RV derivative display added in v0.8.3
+
+RV pressure panels include two additional rows for visual review of single-beat method landmarks:
+
+- First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
+- Second derivative method: RV `d2P/dt2`, with candidate pulmonic valve opening and closing minima
+
+This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It does not yet calculate final `Piso`, `Ees`, or coupling values.

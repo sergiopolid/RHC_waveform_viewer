@@ -18,8 +18,8 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.2"
-APP_VERSION_DATE = "2026-05-27"
+APP_VERSION = "v0.8.3"
+APP_VERSION_DATE = "2026-05-29"
 
 
 def trapezoid_area(y, x):
@@ -1061,6 +1061,11 @@ def is_pcwp_signal(label_or_col: str, filename: str = "") -> bool:
     return pressure_sort_key(label_or_col, filename)[0] == 0
 
 
+def is_rv_signal(label_or_col: str, filename: str = "") -> bool:
+    text = f"{label_or_col} {filename}".upper()
+    return bool(re.search(r"(^|[^A-Z])RV([^A-Z]|$)", text) or "WAV_004" in text)
+
+
 def is_reference_file(filename: str) -> bool:
     return Path(filename).suffix.lower() in {".pdf", ".jpg", ".jpeg", ".png"}
 
@@ -1191,6 +1196,118 @@ def zscore_signal(y: np.ndarray):
     if not np.isfinite(spread) or spread <= 0:
         return None
     return (filled - center) / spread
+
+
+def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray):
+    """
+    Visual feature detection for the Bellofiore RV single-beat methods.
+    This identifies dP/dt extrema and candidate second-derivative minima; it
+    does not yet fit the isovolumic sine wave or calculate Ees/Piso.
+    """
+    t = np.asarray(time_s, dtype=float)
+    p = np.asarray(pressure, dtype=float)
+    ok = np.isfinite(t) & np.isfinite(p)
+    if ok.sum() < 12:
+        return None
+
+    t_ok = t[ok]
+    p_ok = p[ok]
+    order = np.argsort(t_ok)
+    t_ok = t_ok[order]
+    p_ok = p_ok[order]
+    unique_time, unique_idx = np.unique(t_ok, return_index=True)
+    t_ok = unique_time
+    p_ok = p_ok[unique_idx]
+    if len(t_ok) < 12:
+        return None
+
+    dt = np.nanmedian(np.diff(t_ok))
+    if not np.isfinite(dt) or dt <= 0:
+        return None
+
+    p_smooth = p_ok.copy()
+    try:
+        from scipy.signal import savgol_filter, find_peaks
+
+        target_window_s = 0.055
+        window = int(round(target_window_s / dt))
+        window = max(7, window)
+        if window % 2 == 0:
+            window += 1
+        if window >= len(p_smooth):
+            window = len(p_smooth) - 1 if len(p_smooth) % 2 == 0 else len(p_smooth)
+        if window >= 7:
+            p_smooth = savgol_filter(p_smooth, window_length=window, polyorder=3, mode="interp")
+    except Exception:
+        find_peaks = None
+
+    dpdt = np.gradient(p_smooth, t_ok)
+    d2pdt2 = np.gradient(dpdt, t_ok)
+
+    events = []
+    dpdt_max_idx = int(np.nanargmax(dpdt))
+    dpdt_min_idx = int(np.nanargmin(dpdt))
+    pressure_peak_idx = int(np.nanargmax(p_smooth))
+    events.extend(
+        [
+            {
+                "event": "dP/dt max",
+                "method": "First derivative",
+                "time_s": float(t_ok[dpdt_max_idx]),
+                "value": float(dpdt[dpdt_max_idx]),
+                "row": "dpdt",
+                "description": "Isovolumic contraction reference",
+            },
+            {
+                "event": "dP/dt min",
+                "method": "First derivative",
+                "time_s": float(t_ok[dpdt_min_idx]),
+                "value": float(dpdt[dpdt_min_idx]),
+                "row": "dpdt",
+                "description": "Isovolumic relaxation reference",
+            },
+        ]
+    )
+
+    second_derivative_minima = []
+    if find_peaks is not None:
+        distance = max(1, int(round(0.10 / dt)))
+        prominence = max(np.nanstd(d2pdt2) * 0.35, (np.nanpercentile(d2pdt2, 75) - np.nanpercentile(d2pdt2, 25)) * 0.35)
+        peaks, _ = find_peaks(-d2pdt2, distance=distance, prominence=prominence)
+        second_derivative_minima = [int(i) for i in peaks]
+
+    if not second_derivative_minima:
+        second_derivative_minima = list(range(len(t_ok)))
+
+    opening_candidates = [i for i in second_derivative_minima if i < pressure_peak_idx]
+    closing_candidates = [i for i in second_derivative_minima if i > pressure_peak_idx]
+    selected_minima = []
+    if opening_candidates:
+        selected_minima.append(("PV opening candidate", min(opening_candidates, key=lambda i: d2pdt2[i])))
+    if closing_candidates:
+        selected_minima.append(("PV closing candidate", min(closing_candidates, key=lambda i: d2pdt2[i])))
+
+    for label, idx in selected_minima:
+        events.append(
+            {
+                "event": label,
+                "method": "Second derivative",
+                "time_s": float(t_ok[idx]),
+                "value": float(d2pdt2[idx]),
+                "row": "d2pdt2",
+                "description": "Candidate sharp slope-change point",
+            }
+        )
+
+    derivative_df = pd.DataFrame(
+        {
+            "time_s": t_ok,
+            "rv_pressure_smooth_mmHg": p_smooth,
+            "rv_dpdt_mmHg_per_s": dpdt,
+            "rv_d2pdt2_mmHg_per_s2": d2pdt2,
+        }
+    )
+    return derivative_df, pd.DataFrame(events)
 
 
 def pressure_ecg_lag_window(
@@ -3008,7 +3125,7 @@ with viewer_tab:
         )
 
         fig.update_layout(
-            height=440 if bottom_row == 2 else 280,
+            height=max(280, 170 * bottom_row + 100),
             hovermode="x",
             legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
             margin=dict(t=70, b=95),
@@ -3026,9 +3143,20 @@ with viewer_tab:
             ecg_values = aligned[ecg_col]
             ecg_name = f"EKG reference for {pressure_label}"
 
+        rv_derivative_analysis = None
+        if is_rv_signal(pressure_col, source_record.get("filename", "")):
+            rv_derivative_analysis = rv_single_beat_derivative_analysis(aligned["time_s"].to_numpy(float), aligned[pressure_col].to_numpy(float))
+
         plot_rows = 2 if ecg_values is not None else 1
         subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
         pressure_row = plot_rows
+        dpdt_row = None
+        d2pdt2_row = None
+        if rv_derivative_analysis is not None:
+            dpdt_row = plot_rows + 1
+            d2pdt2_row = plot_rows + 2
+            plot_rows += 2
+            subplot_titles.extend(["First derivative method: dP/dt", "Second derivative method: d2P/dt2"])
 
         fig = make_subplots(
             rows=plot_rows,
@@ -3073,8 +3201,90 @@ with viewer_tab:
         else:
             fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
 
+        if rv_derivative_analysis is not None and dpdt_row is not None and d2pdt2_row is not None:
+            rv_derivatives, rv_events = rv_derivative_analysis
+            fig.add_trace(
+                go.Scatter(
+                    x=rv_derivatives["time_s"],
+                    y=rv_derivatives["rv_dpdt_mmHg_per_s"],
+                    mode="lines",
+                    name="RV dP/dt",
+                    line=dict(color="rgb(16, 130, 92)", width=1.5),
+                    hovertemplate="Time: %{x:.3f} s<br>dP/dt: %{y:.1f} mmHg/s<extra></extra>",
+                ),
+                row=dpdt_row,
+                col=1,
+            )
+            first_events = rv_events[rv_events["row"] == "dpdt"]
+            for _, event in first_events.iterrows():
+                color = "rgb(220, 38, 38)" if event["event"] == "dP/dt max" else "rgb(37, 99, 235)"
+                fig.add_trace(
+                    go.Scatter(
+                        x=[event["time_s"]],
+                        y=[event["value"]],
+                        mode="markers+text",
+                        name=event["event"],
+                        marker=dict(color=color, size=9, symbol="diamond"),
+                        text=[event["event"]],
+                        textposition="top center",
+                        hovertemplate=(
+                            f"{event['event']}<br>Time: %{{x:.3f}} s<br>"
+                            "Value: %{y:.1f} mmHg/s<extra></extra>"
+                        ),
+                    ),
+                    row=dpdt_row,
+                    col=1,
+                )
+            fig.update_yaxes(title_text="mmHg/s", row=dpdt_row, col=1)
+
+            fig.add_trace(
+                go.Scatter(
+                    x=rv_derivatives["time_s"],
+                    y=rv_derivatives["rv_d2pdt2_mmHg_per_s2"],
+                    mode="lines",
+                    name="RV d2P/dt2",
+                    line=dict(color="rgb(124, 58, 237)", width=1.5),
+                    hovertemplate="Time: %{x:.3f} s<br>d2P/dt2: %{y:.1f} mmHg/s2<extra></extra>",
+                ),
+                row=d2pdt2_row,
+                col=1,
+            )
+            second_events = rv_events[rv_events["row"] == "d2pdt2"]
+            for _, event in second_events.iterrows():
+                fig.add_trace(
+                    go.Scatter(
+                        x=[event["time_s"]],
+                        y=[event["value"]],
+                        mode="markers+text",
+                        name=event["event"],
+                        marker=dict(color="rgb(245, 125, 40)", size=9, symbol="circle"),
+                        text=[event["event"].replace(" candidate", "")],
+                        textposition="bottom center",
+                        hovertemplate=(
+                            f"{event['event']}<br>Time: %{{x:.3f}} s<br>"
+                            "Value: %{y:.1f} mmHg/s2<extra></extra>"
+                        ),
+                    ),
+                    row=d2pdt2_row,
+                    col=1,
+                )
+            fig.update_yaxes(title_text="mmHg/s2", row=d2pdt2_row, col=1)
+
         decorate_waveform_figure(fig, bottom_row=plot_rows)
         st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
+        if rv_derivative_analysis is not None:
+            _, rv_events = rv_derivative_analysis
+            st.caption(
+                "RV single-beat derivative view based on Bellofiore et al. 2017: dP/dt max/min mark "
+                "first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
+                "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
+            )
+            with st.expander("RV derivative feature times", expanded=False):
+                st.dataframe(
+                    rv_events[["method", "event", "time_s", "value", "description"]],
+                    width="stretch",
+                    hide_index=True,
+                )
         st.slider(
             f"{pressure_col} fine time alignment (ms)",
             min_value=-1000,
