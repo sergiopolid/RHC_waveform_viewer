@@ -214,6 +214,19 @@ The sidebar includes a `Dark Mode` toggle stored in `st.session_state.dark_mode`
 
 Waveform traces, cursor shading, labeled interval shading, RV derivative landmarks, and data-dictionary cartoons switch colors with the active theme.
 
+## RV volume proxy display added in v0.8.17
+
+The RV tab now adds an exploratory Kremer-style derived proxy row below the HMP/landmark row. For each accepted RV beat, the app calculates:
+
+- `uQ = HMP - Pv`, shown as a positive uncalibrated flow proxy
+- cumulative uncalibrated volume/depletion proxy from the HMP-pressure difference
+- relative volume proxy scaled from 1 to 0 within the beat
+- pressure/relative-volume elastance proxy
+- ESP proxy at maximum elastance proxy
+- PBEF proxy, `1 - ESP/Pmax`
+
+These values are displayed for QC/research exploration only. True volume calibration, stroke volume calibration, `Ees`, `Ea`, and `Ees/Ea` remain disabled until validated external volume/SV inputs are added.
+
 ## RV derivative and HMP preview updated in v0.8.15
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:

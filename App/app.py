@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.16"
+APP_VERSION = "v0.8.17"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -230,6 +230,35 @@ def trapezoid_area(y, x):
     if hasattr(np, "trapezoid"):
         return np.trapezoid(y, x)
     return np.trapz(y, x)
+
+
+def cumulative_trapezoid_area(y: np.ndarray, x: np.ndarray) -> np.ndarray:
+    y = np.asarray(y, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(y) == 0:
+        return np.asarray([], dtype=float)
+    out = np.zeros(len(y), dtype=float)
+    if len(y) == 1:
+        return out
+    dx = np.diff(x)
+    avg_y = 0.5 * (y[:-1] + y[1:])
+    out[1:] = np.cumsum(avg_y * dx)
+    return out
+
+
+def minmax_normalize(y: np.ndarray) -> np.ndarray:
+    y = np.asarray(y, dtype=float)
+    out = np.full_like(y, np.nan, dtype=float)
+    finite = np.isfinite(y)
+    if finite.sum() == 0:
+        return out
+    ymin = float(np.nanmin(y[finite]))
+    ymax = float(np.nanmax(y[finite]))
+    if not np.isfinite(ymin) or not np.isfinite(ymax) or ymax <= ymin:
+        out[finite] = 0.0
+        return out
+    out[finite] = (y[finite] - ymin) / (ymax - ymin)
+    return out
 
 
 # -----------------------------
@@ -1545,10 +1574,42 @@ def construct_rv_hmp_curve(
 
     measured = np.interp(t_curve, t_ok, p_smooth)
     uq = hmp - measured
+    uq_positive = np.maximum(uq, 0.0)
+    uvolume_kremer = -cumulative_trapezoid_area(uq, t_curve)
+    volume_depletion = cumulative_trapezoid_area(uq_positive, t_curve)
+    stroke_volume_proxy = float(np.nanmax(volume_depletion) - np.nanmin(volume_depletion))
+    if np.isfinite(stroke_volume_proxy) and stroke_volume_proxy > 0:
+        relative_volume = 1.0 - (volume_depletion - float(np.nanmin(volume_depletion))) / stroke_volume_proxy
+        relative_volume = np.clip(relative_volume, 0.0, 1.0)
+        elastance_proxy = np.divide(
+            measured,
+            relative_volume,
+            out=np.full_like(measured, np.nan, dtype=float),
+            where=relative_volume > 0.05,
+        )
+        if np.isfinite(elastance_proxy).any():
+            esp_idx = int(np.nanargmax(elastance_proxy))
+            esp_mmHg = float(measured[esp_idx])
+            esp_time_s = float(t_curve[esp_idx])
+            elastance_max = float(elastance_proxy[esp_idx])
+        else:
+            esp_idx = None
+            esp_mmHg = np.nan
+            esp_time_s = np.nan
+            elastance_max = np.nan
+    else:
+        relative_volume = np.full_like(measured, np.nan, dtype=float)
+        elastance_proxy = np.full_like(measured, np.nan, dtype=float)
+        stroke_volume_proxy = np.nan
+        esp_idx = None
+        esp_mmHg = np.nan
+        esp_time_s = np.nan
+        elastance_max = np.nan
     pmax_idx = int(np.nanargmax(hmp))
     pmax = float(hmp[pmax_idx])
     if not np.isfinite(pmax) or pmax <= pressure_peak_mmHg:
         return None
+    pbef = 1.0 - (esp_mmHg / pmax) if np.isfinite(esp_mmHg) and pmax > 0 else np.nan
 
     return pd.DataFrame(
         {
@@ -1557,8 +1618,21 @@ def construct_rv_hmp_curve(
             "hmp_mmHg": hmp,
             "rv_pressure_smooth_mmHg": measured,
             "uq_hmp_minus_pv_mmHg": uq,
+            "uq_positive_proxy": uq_positive,
+            "uvolume_kremer_uncalibrated": uvolume_kremer,
+            "volume_depletion_proxy": volume_depletion,
+            "relative_volume_proxy": relative_volume,
+            "elastance_proxy_mmHg_per_relative_volume": elastance_proxy,
+            "uq_positive_display_0_1": minmax_normalize(uq_positive),
+            "volume_depletion_display_0_1": minmax_normalize(volume_depletion),
+            "elastance_display_0_1": minmax_normalize(elastance_proxy),
             "pmax_hmp_mmHg": pmax,
             "pmax_time_s": float(t_curve[pmax_idx]),
+            "esp_proxy_mmHg": esp_mmHg,
+            "esp_proxy_time_s": esp_time_s,
+            "max_elastance_proxy": elastance_max,
+            "pbef_proxy": pbef,
+            "stroke_volume_proxy_area": stroke_volume_proxy,
             "dpdt_max_time_s": t1,
             "dpdt_min_time_s": t2,
             "dpdt_max_slope_mmHg_per_s_corrected": m1,
@@ -1699,6 +1773,8 @@ def rv_single_beat_derivative_analysis(
         if hmp_df is not None:
             hmp_parts.append(hmp_df)
             hmp_peak = hmp_df.iloc[int(hmp_df["hmp_mmHg"].to_numpy(float).argmax())]
+            esp_time = float(hmp_df["esp_proxy_time_s"].iloc[0])
+            esp_value = float(hmp_df["esp_proxy_mmHg"].iloc[0])
             events.append(
                 {
                     **base_event,
@@ -1710,6 +1786,18 @@ def rv_single_beat_derivative_analysis(
                     "description": "Exploratory HMP peak from cubic curve between dP/dt max and dP/dt min",
                 }
             )
+            if np.isfinite(esp_time) and np.isfinite(esp_value):
+                events.append(
+                    {
+                        **base_event,
+                        "event": "ESP proxy",
+                        "method": "Uncalibrated elastance proxy",
+                        "time_s": esp_time,
+                        "value": esp_value,
+                        "row": "rv_peak_fit",
+                        "description": "End-systolic pressure proxy at maximum pressure/relative-volume elastance",
+                    }
+                )
 
         ic_threshold = 0.20 * float(dpdt[dpdt_max_idx])
         ic_candidates = beat_indices[(beat_indices <= dpdt_max_idx) & (dpdt[beat_indices] >= ic_threshold)]
@@ -3095,7 +3183,8 @@ with viewer_tab:
         with st.expander("RV single-beat analysis", expanded=False):
             st.caption(
                 "RV sine reconstruction and Ees/Ea calculations are disabled. "
-                "The RV tab shows pressure-derived beats, first-derivative landmarks, and an exploratory Kremer-style HMP curve."
+                "The RV tab shows pressure-derived beats, first-derivative landmarks, an exploratory Kremer-style HMP curve, "
+                "and uncalibrated flow/volume/elastance proxy channels."
             )
 
         st.header("Database")
@@ -3696,14 +3785,17 @@ with viewer_tab:
             subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
             pressure_row = plot_rows
             peak_fit_row = None
+            volume_row = None
             dpdt_row = None
             if rv_derivative_analysis is not None:
                 peak_fit_row = plot_rows + 1
-                dpdt_row = plot_rows + 2
-                plot_rows += 2
+                volume_row = plot_rows + 2
+                dpdt_row = plot_rows + 3
+                plot_rows += 3
                 subplot_titles.extend(
                     [
                         "RV beat peaks, HMP preview, and first-derivative landmarks",
+                        "Kremer-derived uncalibrated flow, volume, and elastance proxies",
                         "First derivative method: dP/dt",
                     ]
                 )
@@ -3752,7 +3844,7 @@ with viewer_tab:
             else:
                 fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
 
-            if rv_derivative_analysis is not None and peak_fit_row is not None and dpdt_row is not None:
+            if rv_derivative_analysis is not None and peak_fit_row is not None and volume_row is not None and dpdt_row is not None:
                 rv_derivatives, rv_events, rv_hmp, _ = rv_derivative_analysis
                 fig.add_trace(
                     go.Scatter(
@@ -3846,7 +3938,75 @@ with viewer_tab:
                         row=peak_fit_row,
                         col=1,
                     )
+                esp_events = peak_events[peak_events["event"] == "ESP proxy"]
+                if not esp_events.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=esp_events["time_s"],
+                            y=esp_events["value"],
+                            mode="markers",
+                            name="ESP proxy",
+                            marker=dict(color=chart_theme["warning"], size=10, symbol="circle-open"),
+                            hovertemplate="Beat %{customdata}: ESP proxy<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
+                            customdata=esp_events["beat_id"],
+                        ),
+                        row=peak_fit_row,
+                        col=1,
+                    )
                 fig.update_yaxes(title_text="mmHg", row=peak_fit_row, col=1)
+
+                if not rv_hmp.empty:
+                    for beat_id, hmp_df in rv_hmp.groupby("beat_id", sort=True):
+                        show_first = int(beat_id) == int(rv_hmp["beat_id"].min())
+                        fig.add_trace(
+                            go.Scatter(
+                                x=hmp_df["time_s"],
+                                y=hmp_df["uq_positive_display_0_1"],
+                                mode="lines",
+                                name="uQ+ proxy",
+                                line=dict(color=chart_theme["accent"], width=1.6),
+                                hovertemplate=(
+                                    f"Beat {int(beat_id)} uQ+ proxy<br>Time: %{{x:.3f}} s<br>"
+                                    "Display normalized uQ+: %{y:.3f}<extra></extra>"
+                                ),
+                                showlegend=show_first,
+                            ),
+                            row=volume_row,
+                            col=1,
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=hmp_df["time_s"],
+                                y=hmp_df["relative_volume_proxy"],
+                                mode="lines",
+                                name="Relative volume proxy",
+                                line=dict(color=chart_theme["landmark"], width=2.0),
+                                hovertemplate=(
+                                    f"Beat {int(beat_id)} relative volume proxy<br>Time: %{{x:.3f}} s<br>"
+                                    "Relative volume: %{y:.3f}<extra></extra>"
+                                ),
+                                showlegend=show_first,
+                            ),
+                            row=volume_row,
+                            col=1,
+                        )
+                        fig.add_trace(
+                            go.Scatter(
+                                x=hmp_df["time_s"],
+                                y=hmp_df["elastance_display_0_1"],
+                                mode="lines",
+                                name="Elastance proxy",
+                                line=dict(color=chart_theme["purple"], width=1.5, dash="dot"),
+                                hovertemplate=(
+                                    f"Beat {int(beat_id)} elastance proxy<br>Time: %{{x:.3f}} s<br>"
+                                    "Display normalized elastance: %{y:.3f}<extra></extra>"
+                                ),
+                                showlegend=show_first,
+                            ),
+                            row=volume_row,
+                            col=1,
+                        )
+                    fig.update_yaxes(title_text="Display-normalized proxy", row=volume_row, col=1)
 
                 fig.add_trace(
                     go.Scatter(
@@ -3892,7 +4052,8 @@ with viewer_tab:
                     "RV single-beat derivative view: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
                     "dP/dt max/min mark first-derivative IC/IR references. "
                     "The dashed HMP preview follows Kremer 2026's hydromotive-pressure concept using a cubic curve between dP/dt max and dP/dt min. "
-                    "Ees/Ea calculations remain disabled until PV-loop calibration is implemented."
+                    "The extra proxy row derives uQ = HMP - Pv, an uncalibrated relative-volume trace, elastance proxy, ESP proxy, and PBEF proxy; uQ and elastance are display-normalized so the traces can be read together. "
+                    "Calibrated volumes, Ees, Ea, and Ees/Ea remain disabled."
                 )
                 if not rv_hmp.empty:
                     hmp_summary = (
@@ -3901,6 +4062,11 @@ with viewer_tab:
                                 "beat_id",
                                 "pmax_hmp_mmHg",
                                 "pmax_time_s",
+                                "esp_proxy_mmHg",
+                                "esp_proxy_time_s",
+                                "pbef_proxy",
+                                "stroke_volume_proxy_area",
+                                "max_elastance_proxy",
                                 "dpdt_max_time_s",
                                 "dpdt_min_time_s",
                                 "dpdt_max_slope_mmHg_per_s_corrected",
@@ -3910,7 +4076,7 @@ with viewer_tab:
                         .drop_duplicates()
                         .sort_values("beat_id")
                     )
-                    with st.expander("RV HMP preview summary", expanded=False):
+                    with st.expander("RV HMP / volume proxy summary", expanded=False):
                         st.dataframe(hmp_summary, width="stretch", hide_index=True)
                 with st.expander("RV derivative feature times", expanded=False):
                     event_cols = [
