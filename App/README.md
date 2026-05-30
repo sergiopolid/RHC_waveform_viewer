@@ -7,7 +7,7 @@ This version adds synchronized dual cursors, patient/case metadata, automatic V-
 - Dual synchronized cursors visible across all waveform panels
 - Active selected frame shaded in all panels
 - Tabbed waveform workspace with an overview/setup tab plus separate tabs for each mapped pressure channel
-- RV waveform panels include beat-by-beat dP/dt and reconstructed half-sine Pmax/Piso display for single-beat method review
+- RV waveform panels include beat-by-beat dP/dt and pressure-derived landmark display for single-beat method review
 - Label interval windows such as:
   - V wave 1
   - V wave 2
@@ -208,22 +208,16 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative and Piso display updated in v0.8.12
+## RV derivative display updated in v0.8.14
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:
 
-- RV beat peaks and half-sine `Pmax/Piso` interpolation: smoothed RV pressure, measured RV peak, `Pes`, IC/IR samples used for interpolation, 20% dP/dt interpolation limits, half-sine isovolumic curve, and `Piso` marker
+- RV beat peaks and first-derivative landmarks: smoothed RV pressure, measured RV peak, `Pes`, and 20% dP/dt IC/IR range markers
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 
-This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It estimates visual `Pmax/Piso` candidates using `Pbase + amplitude * sin(pi * (t - t_offset) / Tsys)`, so the fitted half-sine sits on the RV pressure baseline rather than being forced through zero. `IVO` is estimated at `dP/dt max`; `IVC` and `Pes` are estimated at `dP/dt min`.
+This is currently a feature-identification/QC display based on Bellofiore et al. 2017. `IVO` is estimated at `dP/dt max`; `IVC` and `Pes` are estimated at `dP/dt min`.
 
-`Piso` candidates are constrained to sit clearly above the measured RV pressure peak for that beat, using the beat pulse pressure to set a visible physiologic margin. If the sine interpolation cannot satisfy that requirement, the app skips that candidate rather than displaying a misleading low fitted peak.
-
-Optional sidebar inputs for stroke volume and RV EDV enable single-beat mechanics:
-
-- `Ees = (Pmax - Pes) / (EDV - SV)` when EDV is greater than SV
-- `Ea = Pes / SV` when SV is supplied
-- `Ees/Ea` when both Ees and Ea are available
+`Pmax/Piso` sine reconstruction and derived `Ees`, `Ea`, and `Ees/Ea` calculations are disabled for now because the reconstructed isovolumic waveform is not yet reliable enough to support those values.
 
 ## Waveform workspace layout updated in v0.8.13
 
