@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.12"
+APP_VERSION = "v0.8.13"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -3534,334 +3534,367 @@ with viewer_tab:
 
     rendered_pressure_cols = sorted([c for c in display_signal_cols if c in displayed_pressure_cols], key=pressure_sort_key)
 
-    for pressure_col in rendered_pressure_cols:
-        pressure_label = pressure_col.replace("_mmHg", "")
-        source_record = pressure_source_by_col.get(pressure_col, {})
-        source_ecg = same_file_ecg_by_pressure_col.get(pressure_col)
-        ecg_values = source_ecg["values"] if source_ecg is not None else None
-        ecg_name = f"EKG from {pressure_label}"
-        if ecg_values is None and chosen_ecg is not None and ecg_col in aligned.columns:
-            ecg_values = aligned[ecg_col]
-            ecg_name = f"EKG reference for {pressure_label}"
+    def waveform_tab_label(col: str) -> str:
+        source = pressure_source_by_col.get(col, {})
+        label = str(source.get("label") or col.replace("_mmHg", ""))
+        filename = Path(str(source.get("filename", ""))).stem
+        return f"{label} ({filename})" if filename else label
 
-        rv_derivative_analysis = None
-        is_rv_pressure = is_mapped_rv_pressure(pressure_col, source_record)
-        if is_rv_pressure:
-            rv_derivative_analysis = rv_single_beat_derivative_analysis(
-                aligned["time_s"].to_numpy(float),
-                aligned[pressure_col].to_numpy(float),
-                stroke_volume_ml=rv_stroke_volume_ml,
-                edv_ml=rv_edv_ml,
+    waveform_tab_labels = ["Overview / setup"] + [waveform_tab_label(c) for c in rendered_pressure_cols]
+    waveform_tabs = st.tabs(waveform_tab_labels) if waveform_tab_labels else []
+    if waveform_tabs:
+        with waveform_tabs[0]:
+            st.markdown("**Current waveform workspace**")
+            overview_cols = st.columns(4)
+            overview_cols[0].metric("Pressure tabs", len(rendered_pressure_cols))
+            overview_cols[1].metric("Displayed channels", len(display_signal_cols))
+            overview_cols[2].metric("Labeled intervals", len(st.session_state.intervals))
+            overview_cols[3].metric("References", len(reference_files))
+            overview_rows = []
+            for col in rendered_pressure_cols:
+                source = pressure_source_by_col.get(col, {})
+                overview_rows.append(
+                    {
+                        "tab": waveform_tab_label(col),
+                        "mapped_label": source.get("label", col.replace("_mmHg", "")),
+                        "source_file": source.get("filename", ""),
+                        "same_file_ekg": "yes" if col in same_file_ecg_by_pressure_col else "fallback/global or none",
+                        "rv_analysis": "yes" if is_mapped_rv_pressure(col, source) else "no",
+                    }
+                )
+            if overview_rows:
+                st.dataframe(pd.DataFrame(overview_rows), width="stretch", hide_index=True)
+            st.caption("Use the waveform tabs above to switch between mapped channels. Cursor labels, axis choices, exports, and database saving remain global across all tabs.")
+
+    for waveform_container, pressure_col in zip(waveform_tabs[1:], rendered_pressure_cols):
+        with waveform_container:
+            pressure_label = pressure_col.replace("_mmHg", "")
+            source_record = pressure_source_by_col.get(pressure_col, {})
+            source_ecg = same_file_ecg_by_pressure_col.get(pressure_col)
+            ecg_values = source_ecg["values"] if source_ecg is not None else None
+            ecg_name = f"EKG from {pressure_label}"
+            if ecg_values is None and chosen_ecg is not None and ecg_col in aligned.columns:
+                ecg_values = aligned[ecg_col]
+                ecg_name = f"EKG reference for {pressure_label}"
+
+            rv_derivative_analysis = None
+            is_rv_pressure = is_mapped_rv_pressure(pressure_col, source_record)
+            if is_rv_pressure:
+                rv_derivative_analysis = rv_single_beat_derivative_analysis(
+                    aligned["time_s"].to_numpy(float),
+                    aligned[pressure_col].to_numpy(float),
+                    stroke_volume_ml=rv_stroke_volume_ml,
+                    edv_ml=rv_edv_ml,
+                )
+                if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
+                    rv_derivative_analysis = None
+
+            plot_rows = 2 if ecg_values is not None else 1
+            subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
+            pressure_row = plot_rows
+            peak_fit_row = None
+            dpdt_row = None
+            if rv_derivative_analysis is not None:
+                peak_fit_row = plot_rows + 1
+                dpdt_row = plot_rows + 2
+                plot_rows += 2
+                subplot_titles.extend(
+                    [
+                        "RV beat peaks and half-sine Pmax interpolation",
+                        "First derivative method: dP/dt",
+                    ]
+                )
+
+            fig = make_subplots(
+                rows=plot_rows,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.06,
+                subplot_titles=subplot_titles,
             )
-            if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
-                rv_derivative_analysis = None
 
-        plot_rows = 2 if ecg_values is not None else 1
-        subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
-        pressure_row = plot_rows
-        peak_fit_row = None
-        dpdt_row = None
-        if rv_derivative_analysis is not None:
-            peak_fit_row = plot_rows + 1
-            dpdt_row = plot_rows + 2
-            plot_rows += 2
-            subplot_titles.extend(
-                [
-                    "RV beat peaks and half-sine Pmax interpolation",
-                    "First derivative method: dP/dt",
-                ]
-            )
+            if ecg_values is not None:
+                fig.add_trace(
+                    go.Scatter(
+                        x=aligned["time_s"],
+                        y=ecg_values,
+                        mode="lines",
+                        name=ecg_name,
+                        line=dict(color="rgba(30, 90, 200, 0.75)", width=1.2),
+                        hovertemplate=f"Time: %{{x:.3f}} s<br>{ecg_name}: %{{y:.3f}} mV<extra></extra>",
+                    ),
+                    row=1,
+                    col=1,
+                )
+                fig.update_yaxes(title_text="mV", row=1, col=1)
 
-        fig = make_subplots(
-            rows=plot_rows,
-            cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.06,
-            subplot_titles=subplot_titles,
-        )
-
-        if ecg_values is not None:
             fig.add_trace(
                 go.Scatter(
                     x=aligned["time_s"],
-                    y=ecg_values,
+                    y=aligned[pressure_col],
                     mode="lines",
-                    name=ecg_name,
-                    line=dict(color="rgba(30, 90, 200, 0.75)", width=1.2),
-                    hovertemplate=f"Time: %{{x:.3f}} s<br>{ecg_name}: %{{y:.3f}} mV<extra></extra>",
+                    name=f"Pressure from {pressure_label}",
+                    hovertemplate=f"Time: %{{x:.3f}} s<br>{pressure_col}: %{{y:.3f}} mmHg<extra></extra>",
                 ),
-                row=1,
+                row=pressure_row,
                 col=1,
             )
-            fig.update_yaxes(title_text="mV", row=1, col=1)
 
-        fig.add_trace(
-            go.Scatter(
-                x=aligned["time_s"],
-                y=aligned[pressure_col],
-                mode="lines",
-                name=f"Pressure from {pressure_label}",
-                hovertemplate=f"Time: %{{x:.3f}} s<br>{pressure_col}: %{{y:.3f}} mmHg<extra></extra>",
-            ),
-            row=pressure_row,
-            col=1,
-        )
+            if use_custom_y_axis and pressure_col in custom_y_ranges:
+                ymin, ymax = custom_y_ranges[pressure_col]
+                fig.update_yaxes(title_text="mmHg", range=[ymin, ymax], row=pressure_row, col=1)
+            elif use_global_y_axis and y_global_min is not None and y_global_max is not None:
+                fig.update_yaxes(title_text="mmHg", range=[y_global_min, y_global_max], row=pressure_row, col=1)
+            else:
+                fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
 
-        if use_custom_y_axis and pressure_col in custom_y_ranges:
-            ymin, ymax = custom_y_ranges[pressure_col]
-            fig.update_yaxes(title_text="mmHg", range=[ymin, ymax], row=pressure_row, col=1)
-        elif use_global_y_axis and y_global_min is not None and y_global_max is not None:
-            fig.update_yaxes(title_text="mmHg", range=[y_global_min, y_global_max], row=pressure_row, col=1)
-        else:
-            fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
-
-        if rv_derivative_analysis is not None and peak_fit_row is not None and dpdt_row is not None:
-            rv_derivatives, rv_events, rv_fits, rv_fit_samples = rv_derivative_analysis
-            fig.add_trace(
-                go.Scatter(
-                    x=rv_derivatives["time_s"],
-                    y=rv_derivatives["rv_pressure_smooth_mmHg"],
-                    mode="lines",
-                    name="RV pressure for beat peak/Piso review",
-                    line=dict(color="rgba(20, 20, 20, 0.82)", width=1.7),
-                    hovertemplate="Time: %{x:.3f} s<br>RV pressure: %{y:.2f} mmHg<extra></extra>",
-                ),
-                row=peak_fit_row,
-                col=1,
-            )
-            peak_events = rv_events[rv_events["row"] == "rv_peak_fit"]
-            measured_peaks = peak_events[peak_events["event"] == "RV pressure peak"]
-            if not measured_peaks.empty:
+            if rv_derivative_analysis is not None and peak_fit_row is not None and dpdt_row is not None:
+                rv_derivatives, rv_events, rv_fits, rv_fit_samples = rv_derivative_analysis
                 fig.add_trace(
                     go.Scatter(
-                        x=measured_peaks["time_s"],
-                        y=measured_peaks["value"],
-                        mode="markers",
-                        name="Measured RV peak",
-                        marker=dict(color="rgb(220, 38, 38)", size=8, symbol="triangle-up"),
-                        hovertemplate="Beat %{customdata}: measured RV peak<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
-                        customdata=measured_peaks["beat_id"],
+                        x=rv_derivatives["time_s"],
+                        y=rv_derivatives["rv_pressure_smooth_mmHg"],
+                        mode="lines",
+                        name="RV pressure for beat peak/Piso review",
+                        line=dict(color="rgba(20, 20, 20, 0.82)", width=1.7),
+                        hovertemplate="Time: %{x:.3f} s<br>RV pressure: %{y:.2f} mmHg<extra></extra>",
                     ),
                     row=peak_fit_row,
                     col=1,
                 )
-            pes_events = peak_events[peak_events["event"] == "Pes estimate"]
-            if not pes_events.empty:
-                fig.add_trace(
-                    go.Scatter(
-                        x=pes_events["time_s"],
-                        y=pes_events["value"],
-                        mode="markers",
-                        name="Pes estimate",
-                        marker=dict(color="rgb(14, 116, 144)", size=9, symbol="square"),
-                        hovertemplate="Beat %{customdata}: Pes estimate<br>Time: %{x:.3f} s<br>Pes: %{y:.2f} mmHg<extra></extra>",
-                        customdata=pes_events["beat_id"],
-                    ),
-                    row=peak_fit_row,
-                    col=1,
-                )
-            fit_limits = peak_events[peak_events["event"].isin(["IC onset 20% dP/dt max", "IR end 20% dP/dt min"])]
-            if not fit_limits.empty:
-                fig.add_trace(
-                    go.Scatter(
-                        x=fit_limits["time_s"],
-                        y=fit_limits["value"],
-                        mode="markers",
-                        name="Sine interpolation limits",
-                        marker=dict(color="rgb(37, 99, 235)", size=7, symbol="x"),
-                        hovertemplate="%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
-                        text=fit_limits["event"],
-                        customdata=fit_limits["beat_id"],
-                    ),
-                    row=peak_fit_row,
-                    col=1,
-                )
-            if not rv_fit_samples.empty:
-                for sample_range, sample_df in rv_fit_samples.groupby("range", sort=False):
+                peak_events = rv_events[rv_events["row"] == "rv_peak_fit"]
+                measured_peaks = peak_events[peak_events["event"] == "RV pressure peak"]
+                if not measured_peaks.empty:
                     fig.add_trace(
                         go.Scatter(
-                            x=sample_df["time_s"],
-                            y=sample_df["pressure_mmHg"],
+                            x=measured_peaks["time_s"],
+                            y=measured_peaks["value"],
                             mode="markers",
-                            name=sample_range,
-                            marker=dict(
-                                color="rgba(37, 99, 235, 0.78)" if sample_range.startswith("IC") else "rgba(16, 185, 129, 0.78)",
-                                size=4,
-                                symbol="circle",
-                            ),
-                            hovertemplate=(
-                                "%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>"
-                                "Pressure: %{y:.2f} mmHg<extra></extra>"
-                            ),
-                            text=sample_df["range"],
-                            customdata=sample_df["beat_id"],
+                            name="Measured RV peak",
+                            marker=dict(color="rgb(220, 38, 38)", size=8, symbol="triangle-up"),
+                            hovertemplate="Beat %{customdata}: measured RV peak<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
+                            customdata=measured_peaks["beat_id"],
                         ),
                         row=peak_fit_row,
                         col=1,
                     )
-            if not rv_fits.empty:
-                for beat_id, fit_df in rv_fits.groupby("beat_id", sort=True):
+                pes_events = peak_events[peak_events["event"] == "Pes estimate"]
+                if not pes_events.empty:
                     fig.add_trace(
                         go.Scatter(
-                            x=fit_df["time_s"],
-                            y=fit_df["piso_fit_mmHg"],
-                            mode="lines",
-                            name=f"Beat {int(beat_id)} reconstructed isovolumic sine",
-                            line=dict(color="rgb(217, 70, 239)", width=3.0, dash="dash"),
-                            hovertemplate=(
-                                f"Beat {int(beat_id)} half-sine isovolumic interpolation<br>Time: %{{x:.3f}} s<br>"
-                                "Reconstructed isovolumic pressure: %{y:.2f} mmHg<extra></extra>"
-                            ),
-                            showlegend=int(beat_id) == int(rv_fits["beat_id"].min()),
-                        ),
-                        row=peak_fit_row,
-                        col=1,
-                    )
-                piso_events = peak_events[peak_events["event"] == "Piso estimate"]
-                if not piso_events.empty:
-                    fig.add_trace(
-                        go.Scatter(
-                            x=piso_events["time_s"],
-                            y=piso_events["value"],
+                            x=pes_events["time_s"],
+                            y=pes_events["value"],
                             mode="markers",
-                            name="Piso estimate",
-                            marker=dict(color="rgb(217, 70, 239)", size=11, symbol="star"),
-                            hovertemplate="Beat %{customdata}: Piso estimate<br>Time: %{x:.3f} s<br>Piso: %{y:.2f} mmHg<extra></extra>",
-                            customdata=piso_events["beat_id"],
+                            name="Pes estimate",
+                            marker=dict(color="rgb(14, 116, 144)", size=9, symbol="square"),
+                            hovertemplate="Beat %{customdata}: Pes estimate<br>Time: %{x:.3f} s<br>Pes: %{y:.2f} mmHg<extra></extra>",
+                            customdata=pes_events["beat_id"],
                         ),
                         row=peak_fit_row,
                         col=1,
                     )
-            fig.update_yaxes(title_text="mmHg", row=peak_fit_row, col=1)
+                fit_limits = peak_events[peak_events["event"].isin(["IC onset 20% dP/dt max", "IR end 20% dP/dt min"])]
+                if not fit_limits.empty:
+                    fig.add_trace(
+                        go.Scatter(
+                            x=fit_limits["time_s"],
+                            y=fit_limits["value"],
+                            mode="markers",
+                            name="Sine interpolation limits",
+                            marker=dict(color="rgb(37, 99, 235)", size=7, symbol="x"),
+                            hovertemplate="%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
+                            text=fit_limits["event"],
+                            customdata=fit_limits["beat_id"],
+                        ),
+                        row=peak_fit_row,
+                        col=1,
+                    )
+                if not rv_fit_samples.empty:
+                    for sample_range, sample_df in rv_fit_samples.groupby("range", sort=False):
+                        fig.add_trace(
+                            go.Scatter(
+                                x=sample_df["time_s"],
+                                y=sample_df["pressure_mmHg"],
+                                mode="markers",
+                                name=sample_range,
+                                marker=dict(
+                                    color="rgba(37, 99, 235, 0.78)" if sample_range.startswith("IC") else "rgba(16, 185, 129, 0.78)",
+                                    size=4,
+                                    symbol="circle",
+                                ),
+                                hovertemplate=(
+                                    "%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>"
+                                    "Pressure: %{y:.2f} mmHg<extra></extra>"
+                                ),
+                                text=sample_df["range"],
+                                customdata=sample_df["beat_id"],
+                            ),
+                            row=peak_fit_row,
+                            col=1,
+                        )
+                if not rv_fits.empty:
+                    for beat_id, fit_df in rv_fits.groupby("beat_id", sort=True):
+                        fig.add_trace(
+                            go.Scatter(
+                                x=fit_df["time_s"],
+                                y=fit_df["piso_fit_mmHg"],
+                                mode="lines",
+                                name=f"Beat {int(beat_id)} reconstructed isovolumic sine",
+                                line=dict(color="rgb(217, 70, 239)", width=3.0, dash="dash"),
+                                hovertemplate=(
+                                    f"Beat {int(beat_id)} half-sine isovolumic interpolation<br>Time: %{{x:.3f}} s<br>"
+                                    "Reconstructed isovolumic pressure: %{y:.2f} mmHg<extra></extra>"
+                                ),
+                                showlegend=int(beat_id) == int(rv_fits["beat_id"].min()),
+                            ),
+                            row=peak_fit_row,
+                            col=1,
+                        )
+                    piso_events = peak_events[peak_events["event"] == "Piso estimate"]
+                    if not piso_events.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=piso_events["time_s"],
+                                y=piso_events["value"],
+                                mode="markers",
+                                name="Piso estimate",
+                                marker=dict(color="rgb(217, 70, 239)", size=11, symbol="star"),
+                                hovertemplate="Beat %{customdata}: Piso estimate<br>Time: %{x:.3f} s<br>Piso: %{y:.2f} mmHg<extra></extra>",
+                                customdata=piso_events["beat_id"],
+                            ),
+                            row=peak_fit_row,
+                            col=1,
+                        )
+                fig.update_yaxes(title_text="mmHg", row=peak_fit_row, col=1)
 
-            fig.add_trace(
-                go.Scatter(
-                    x=rv_derivatives["time_s"],
-                    y=rv_derivatives["rv_dpdt_mmHg_per_s"],
-                    mode="lines",
-                    name="RV dP/dt",
-                    line=dict(color="rgb(16, 130, 92)", width=1.5),
-                    hovertemplate="Time: %{x:.3f} s<br>dP/dt: %{y:.1f} mmHg/s<extra></extra>",
-                ),
-                row=dpdt_row,
-                col=1,
-            )
-            first_events = rv_events[rv_events["row"] == "dpdt"]
-            for _, event in first_events.iterrows():
-                color = "rgb(220, 38, 38)" if event["event"] == "dP/dt max" else "rgb(37, 99, 235)"
                 fig.add_trace(
                     go.Scatter(
-                        x=[event["time_s"]],
-                        y=[event["value"]],
-                        mode="markers",
-                        name=event["event"],
-                        marker=dict(color=color, size=9, symbol="diamond"),
-                        hovertemplate=(
-                            f"Beat {int(event['beat_id'])}: {event['event']}<br>Time: %{{x:.3f}} s<br>"
-                            "Value: %{y:.1f} mmHg/s<extra></extra>"
-                        ),
+                        x=rv_derivatives["time_s"],
+                        y=rv_derivatives["rv_dpdt_mmHg_per_s"],
+                        mode="lines",
+                        name="RV dP/dt",
+                        line=dict(color="rgb(16, 130, 92)", width=1.5),
+                        hovertemplate="Time: %{x:.3f} s<br>dP/dt: %{y:.1f} mmHg/s<extra></extra>",
                     ),
                     row=dpdt_row,
                     col=1,
                 )
-            fig.update_yaxes(title_text="mmHg/s", row=dpdt_row, col=1)
+                first_events = rv_events[rv_events["row"] == "dpdt"]
+                for _, event in first_events.iterrows():
+                    color = "rgb(220, 38, 38)" if event["event"] == "dP/dt max" else "rgb(37, 99, 235)"
+                    fig.add_trace(
+                        go.Scatter(
+                            x=[event["time_s"]],
+                            y=[event["value"]],
+                            mode="markers",
+                            name=event["event"],
+                            marker=dict(color=color, size=9, symbol="diamond"),
+                            hovertemplate=(
+                                f"Beat {int(event['beat_id'])}: {event['event']}<br>Time: %{{x:.3f}} s<br>"
+                                "Value: %{y:.1f} mmHg/s<extra></extra>"
+                            ),
+                        ),
+                        row=dpdt_row,
+                        col=1,
+                    )
+                fig.update_yaxes(title_text="mmHg/s", row=dpdt_row, col=1)
 
-        decorate_waveform_figure(fig, bottom_row=plot_rows)
-        st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
-        if is_rv_pressure and rv_derivative_analysis is None:
-            st.warning(
-                "RV pressure-derived beat windows could not be identified reliably, so the RV-only derivative/Pmax panels were not added."
-            )
-        elif rv_derivative_analysis is not None:
-            _, rv_events, rv_fits, _ = rv_derivative_analysis
-            st.caption(
-                "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
-                "dP/dt max/min mark first-derivative IC/IR references. "
-                "The RV peak/Piso row marks measured RV peaks, Pes at dP/dt min, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the reconstructed half-sine isovolumic pressure curve used to estimate Pmax/Piso. "
-                "Ees, Ea, and Ees/Ea are shown only when stroke volume and EDV are entered."
-            )
-            if not rv_fits.empty:
-                fit_summary = (
-                    rv_fits[
-                        [
-                            "beat_id",
-                            "measured_peak_mmHg",
-                            "pmax_mmHg",
-                            "pes_mmHg",
-                            "p_base_mmHg",
-                            "piso_margin_mmHg",
-                            "ivo_time_s",
-                            "ivc_time_s",
-                            "piso_time_s",
-                            "t_offset_s",
-                            "t_sys_s",
-                            "fit_rmse_mmHg",
-                            "fit_n",
+            decorate_waveform_figure(fig, bottom_row=plot_rows)
+            st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
+            if is_rv_pressure and rv_derivative_analysis is None:
+                st.warning(
+                    "RV pressure-derived beat windows could not be identified reliably, so the RV-only derivative/Pmax panels were not added."
+                )
+            elif rv_derivative_analysis is not None:
+                _, rv_events, rv_fits, _ = rv_derivative_analysis
+                st.caption(
+                    "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
+                    "dP/dt max/min mark first-derivative IC/IR references. "
+                    "The RV peak/Piso row marks measured RV peaks, Pes at dP/dt min, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the reconstructed half-sine isovolumic pressure curve used to estimate Pmax/Piso. "
+                    "Ees, Ea, and Ees/Ea are shown only when stroke volume and EDV are entered."
+                )
+                if not rv_fits.empty:
+                    fit_summary = (
+                        rv_fits[
+                            [
+                                "beat_id",
+                                "measured_peak_mmHg",
+                                "pmax_mmHg",
+                                "pes_mmHg",
+                                "p_base_mmHg",
+                                "piso_margin_mmHg",
+                                "ivo_time_s",
+                                "ivc_time_s",
+                                "piso_time_s",
+                                "t_offset_s",
+                                "t_sys_s",
+                                "fit_rmse_mmHg",
+                                "fit_n",
+                            ]
                         ]
+                        .drop_duplicates()
+                        .sort_values("beat_id")
+                    )
+                    with st.expander("RV Pmax/Piso half-sine interpolation summary", expanded=False):
+                        st.dataframe(fit_summary, width="stretch", hide_index=True)
+                    mechanics_cols = [
+                        "beat_id",
+                        "pmax_mmHg",
+                        "pes_mmHg",
+                        "stroke_volume_ml",
+                        "edv_ml",
+                        "ees_mmHg_per_ml",
+                        "ea_mmHg_per_ml",
+                        "va_coupling_ees_over_ea",
                     ]
-                    .drop_duplicates()
-                    .sort_values("beat_id")
-                )
-                with st.expander("RV Pmax/Piso half-sine interpolation summary", expanded=False):
-                    st.dataframe(fit_summary, width="stretch", hide_index=True)
-                mechanics_cols = [
-                    "beat_id",
-                    "pmax_mmHg",
-                    "pes_mmHg",
-                    "stroke_volume_ml",
-                    "edv_ml",
-                    "ees_mmHg_per_ml",
-                    "ea_mmHg_per_ml",
-                    "va_coupling_ees_over_ea",
-                ]
-                mechanics_summary = rv_fits[mechanics_cols].drop_duplicates().sort_values("beat_id")
-                if mechanics_summary[["ees_mmHg_per_ml", "ea_mmHg_per_ml", "va_coupling_ees_over_ea"]].notna().any().any():
-                    with st.expander("RV single-beat mechanics", expanded=True):
-                        st.dataframe(mechanics_summary, width="stretch", hide_index=True)
-                elif rv_stroke_volume_ml is not None or rv_edv_ml is not None:
-                    st.info("Enter both stroke volume and RV EDV, with EDV greater than stroke volume, to calculate Ees and Ees/Ea. Ea needs stroke volume.")
-            with st.expander("RV derivative feature times", expanded=False):
-                event_cols = [
-                    "beat_id",
-                    "method",
-                    "event",
-                    "beat_start_s",
-                    "beat_end_s",
-                    "beat_duration_s",
-                    "time_s",
-                    "value",
-                    "description",
-                ]
-                st.dataframe(
-                    rv_events[[col for col in event_cols if col in rv_events.columns]],
-                    width="stretch",
-                    hide_index=True,
-                )
-        st.slider(
-            f"{pressure_col} fine time alignment (ms)",
-            min_value=-1000,
-            max_value=1000,
-            value=int(st.session_state.get(f"time_shift_{case_key}_{pressure_col}", 0)),
-            step=10,
-            key=f"time_shift_{case_key}_{pressure_col}",
-            help="Negative moves the pressure waveform earlier/left; positive moves it later/right. The EKG row stays fixed.",
-        )
-        if reference_files and is_pcwp_signal(pressure_col, source_record.get("filename", "")):
-            with st.expander("PCWP reference PDF/image", expanded=show_reference_outputs):
-                matched_references = sorted(
-                    reference_files,
-                    key=lambda ref: reference_sort_key(ref, pressure_col, source_record.get("filename", "")),
-                )
-                reference_names = [ref["name"] for ref in matched_references]
-                selected_reference_name = st.selectbox(
-                    "PCWP reference output",
-                    options=reference_names,
-                    index=0,
-                    key=f"reference_output_{case_key}_{pressure_col}",
-                    help="Shows an uploaded Xper PDF/JPEG/PNG under the PCWP waveform for visual comparison.",
-                )
-                selected_reference = next(ref for ref in matched_references if ref["name"] == selected_reference_name)
-                render_reference_file(selected_reference)
+                    mechanics_summary = rv_fits[mechanics_cols].drop_duplicates().sort_values("beat_id")
+                    if mechanics_summary[["ees_mmHg_per_ml", "ea_mmHg_per_ml", "va_coupling_ees_over_ea"]].notna().any().any():
+                        with st.expander("RV single-beat mechanics", expanded=True):
+                            st.dataframe(mechanics_summary, width="stretch", hide_index=True)
+                    elif rv_stroke_volume_ml is not None or rv_edv_ml is not None:
+                        st.info("Enter both stroke volume and RV EDV, with EDV greater than stroke volume, to calculate Ees and Ees/Ea. Ea needs stroke volume.")
+                with st.expander("RV derivative feature times", expanded=False):
+                    event_cols = [
+                        "beat_id",
+                        "method",
+                        "event",
+                        "beat_start_s",
+                        "beat_end_s",
+                        "beat_duration_s",
+                        "time_s",
+                        "value",
+                        "description",
+                    ]
+                    st.dataframe(
+                        rv_events[[col for col in event_cols if col in rv_events.columns]],
+                        width="stretch",
+                        hide_index=True,
+                    )
+            st.slider(
+                f"{pressure_col} fine time alignment (ms)",
+                min_value=-1000,
+                max_value=1000,
+                value=int(st.session_state.get(f"time_shift_{case_key}_{pressure_col}", 0)),
+                step=10,
+                key=f"time_shift_{case_key}_{pressure_col}",
+                help="Negative moves the pressure waveform earlier/left; positive moves it later/right. The EKG row stays fixed.",
+            )
+            if reference_files and is_pcwp_signal(pressure_col, source_record.get("filename", "")):
+                with st.expander("PCWP reference PDF/image", expanded=show_reference_outputs):
+                    matched_references = sorted(
+                        reference_files,
+                        key=lambda ref: reference_sort_key(ref, pressure_col, source_record.get("filename", "")),
+                    )
+                    reference_names = [ref["name"] for ref in matched_references]
+                    selected_reference_name = st.selectbox(
+                        "PCWP reference output",
+                        options=reference_names,
+                        index=0,
+                        key=f"reference_output_{case_key}_{pressure_col}",
+                        help="Shows an uploaded Xper PDF/JPEG/PNG under the PCWP waveform for visual comparison.",
+                    )
+                    selected_reference = next(ref for ref in matched_references if ref["name"] == selected_reference_name)
+                    render_reference_file(selected_reference)
 
     standalone_ecg_cols = [c for c in display_signal_cols if "EKG" in c]
     if not rendered_pressure_cols and standalone_ecg_cols:

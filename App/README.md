@@ -6,6 +6,7 @@ This version adds synchronized dual cursors, patient/case metadata, automatic V-
 
 - Dual synchronized cursors visible across all waveform panels
 - Active selected frame shaded in all panels
+- Tabbed waveform workspace with an overview/setup tab plus separate tabs for each mapped pressure channel
 - RV waveform panels include beat-by-beat dP/dt and reconstructed half-sine Pmax/Piso display for single-beat method review
 - Label interval windows such as:
   - V wave 1
@@ -223,3 +224,7 @@ Optional sidebar inputs for stroke volume and RV EDV enable single-beat mechanic
 - `Ees = (Pmax - Pes) / (EDV - SV)` when EDV is greater than SV
 - `Ea = Pes / SV` when SV is supplied
 - `Ees/Ea` when both Ees and Ea are available
+
+## Waveform workspace layout updated in v0.8.13
+
+The main waveform viewer now uses a tabbed workspace. The first tab summarizes the current setup, mapped source files, same-file EKG availability, and whether RV-specific analysis is active. Each displayed pressure channel then gets its own tab, so RA, RV, PA, PCWP, and future RV pressure-volume loop views can be reviewed without scrolling through every waveform panel.
