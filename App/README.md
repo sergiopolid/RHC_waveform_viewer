@@ -239,6 +239,16 @@ The RV tab now includes an expandable uncalibrated flow-volume proxy loop. Each 
 
 The x-axis is reversed to resemble conventional pressure/volume-style loop review. This remains an uncalibrated shape/QC visualization, not true mL volume or true mL/s flow.
 
+## Fick stroke-volume calibration added in v0.8.19
+
+Uploaded RHC result PDFs are scanned for the Fick hemodynamics table. When `SV(ml)` is detected, the RV flow-volume proxy loop can be scaled to that stroke-volume excursion:
+
+- flow proxy is scaled to mL/s using the uploaded Fick SV
+- volume excursion is scaled to mL across the detected beat
+- summary tables include the detected/manual `stroke_volume_calibration_ml`, peak calibrated flow, and calibrated loop-area proxy
+
+The sidebar also includes a manual Fick stroke-volume field for scanned PDFs or formatting mismatches. Calibration uses stroke volume only, so absolute EDV/ESV, true RV volume, `Ees`, `Ea`, and `Ees/Ea` remain disabled.
+
 ## RV derivative and HMP preview updated in v0.8.15
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:

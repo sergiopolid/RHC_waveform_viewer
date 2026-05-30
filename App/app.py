@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.18"
+APP_VERSION = "v0.8.19"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -1361,6 +1361,115 @@ def render_reference_file(reference: dict):
         st.image(reference["data"], caption=caption, width="stretch")
 
 
+def numeric_word_value(text: str):
+    cleaned = str(text).replace(",", "").strip()
+    if re.fullmatch(r"-?\d+(?:\.\d+)?", cleaned):
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+    return None
+
+
+def extract_pdf_words(pdf_data: bytes):
+    try:
+        import fitz
+
+        words = []
+        with fitz.open(stream=pdf_data, filetype="pdf") as doc:
+            for page_index, page in enumerate(doc):
+                for item in page.get_text("words"):
+                    x0, y0, x1, y1, text, block, line, word = item[:8]
+                    words.append(
+                        {
+                            "page": page_index,
+                            "x0": float(x0),
+                            "y0": float(y0),
+                            "x1": float(x1),
+                            "y1": float(y1),
+                            "text": str(text),
+                            "block": int(block),
+                            "line": int(line),
+                            "word": int(word),
+                        }
+                    )
+        return words
+    except Exception:
+        return []
+
+
+def value_right_of_label(words: list[dict], label_match, header_match=None):
+    best = None
+    for label in words:
+        if not label_match(label["text"]):
+            continue
+        label_y = (label["y0"] + label["y1"]) / 2.0
+        label_page = label["page"]
+        header_x = None
+        if header_match is not None:
+            headers = [
+                h
+                for h in words
+                if h["page"] == label_page
+                and header_match(h["text"])
+                and h["y0"] < label["y0"]
+                and 0 <= label["y0"] - h["y0"] <= 60
+            ]
+            if headers:
+                header = min(headers, key=lambda h: abs(((h["x0"] + h["x1"]) / 2.0) - label["x1"]))
+                header_x = (header["x0"] + header["x1"]) / 2.0
+
+        candidates = []
+        for word in words:
+            if word["page"] != label_page or word["x0"] <= label["x1"]:
+                continue
+            word_y = (word["y0"] + word["y1"]) / 2.0
+            if abs(word_y - label_y) > 8:
+                continue
+            value = numeric_word_value(word["text"])
+            if value is None:
+                continue
+            x_center = (word["x0"] + word["x1"]) / 2.0
+            header_distance = abs(x_center - header_x) if header_x is not None else 0.0
+            candidates.append((header_distance, x_center - label["x1"], value, word))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        candidate = candidates[0]
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+    return None if best is None else best[2]
+
+
+def extract_rhc_hemodynamics_from_pdf(pdf_data: bytes, filename: str):
+    words = extract_pdf_words(pdf_data)
+    if not words:
+        return None
+
+    def clean_token(token: str) -> str:
+        return re.sub(r"\s+", "", str(token)).lower()
+
+    stroke_volume_ml = value_right_of_label(
+        words,
+        lambda text: clean_token(text) in {"sv(ml)", "svml"},
+        header_match=lambda text: clean_token(text) == "fick",
+    )
+    cardiac_output_l_min = value_right_of_label(
+        words,
+        lambda text: clean_token(text) in {"co(l/min)", "col/min", "co"},
+        header_match=lambda text: clean_token(text) == "fick",
+    )
+
+    if stroke_volume_ml is None and cardiac_output_l_min is None:
+        return None
+    return {
+        "source_file": filename,
+        "stroke_volume_ml": stroke_volume_ml,
+        "cardiac_output_l_min": cardiac_output_l_min,
+        "method": "Fick" if stroke_volume_ml is not None else "",
+    }
+
+
 def resolve_ecg_layout(filename: str, requested_layout: str) -> str:
     if requested_layout != "automatic_by_file_type":
         return requested_layout
@@ -1547,6 +1656,7 @@ def construct_rv_hmp_curve(
     dpdt_min_idx: int,
     pressure_peak_mmHg: float,
     beat_id: int,
+    stroke_volume_ml: float | None = None,
 ):
     """
     Kremer-style hydromotive pressure preview: cubic Hermite curve between
@@ -1625,6 +1735,19 @@ def construct_rv_hmp_curve(
     peak_flow_proxy = float(uq_positive[peak_flow_idx]) if peak_flow_idx is not None else np.nan
     peak_flow_time_s = float(t_curve[peak_flow_idx]) if peak_flow_idx is not None else np.nan
     flow_volume_loop_area_proxy = polygon_loop_area(relative_volume, uq_positive)
+    sv_ml = float(stroke_volume_ml) if stroke_volume_ml is not None and np.isfinite(stroke_volume_ml) and stroke_volume_ml > 0 else np.nan
+    if np.isfinite(sv_ml) and np.isfinite(stroke_volume_proxy) and stroke_volume_proxy > 0:
+        ejected_volume_ml = (volume_depletion - float(np.nanmin(volume_depletion))) * sv_ml / stroke_volume_proxy
+        remaining_sv_volume_ml = sv_ml - ejected_volume_ml
+        flow_ml_per_s = uq_positive * sv_ml / stroke_volume_proxy
+        peak_flow_ml_per_s = peak_flow_proxy * sv_ml / stroke_volume_proxy if np.isfinite(peak_flow_proxy) else np.nan
+        flow_volume_loop_area_ml2_per_s = polygon_loop_area(remaining_sv_volume_ml, flow_ml_per_s)
+    else:
+        ejected_volume_ml = np.full_like(measured, np.nan, dtype=float)
+        remaining_sv_volume_ml = np.full_like(measured, np.nan, dtype=float)
+        flow_ml_per_s = np.full_like(measured, np.nan, dtype=float)
+        peak_flow_ml_per_s = np.nan
+        flow_volume_loop_area_ml2_per_s = np.nan
 
     return pd.DataFrame(
         {
@@ -1638,6 +1761,10 @@ def construct_rv_hmp_curve(
             "volume_depletion_proxy": volume_depletion,
             "relative_volume_proxy": relative_volume,
             "elastance_proxy_mmHg_per_relative_volume": elastance_proxy,
+            "stroke_volume_calibration_ml": sv_ml,
+            "ejected_volume_ml": ejected_volume_ml,
+            "remaining_sv_volume_ml": remaining_sv_volume_ml,
+            "flow_ml_per_s": flow_ml_per_s,
             "uq_positive_display_0_1": minmax_normalize(uq_positive),
             "volume_depletion_display_0_1": minmax_normalize(volume_depletion),
             "elastance_display_0_1": minmax_normalize(elastance_proxy),
@@ -1650,7 +1777,9 @@ def construct_rv_hmp_curve(
             "stroke_volume_proxy_area": stroke_volume_proxy,
             "peak_flow_proxy": peak_flow_proxy,
             "peak_flow_time_s": peak_flow_time_s,
+            "peak_flow_ml_per_s": peak_flow_ml_per_s,
             "flow_volume_loop_area_proxy": flow_volume_loop_area_proxy,
+            "flow_volume_loop_area_ml2_per_s": flow_volume_loop_area_ml2_per_s,
             "dpdt_max_time_s": t1,
             "dpdt_min_time_s": t2,
             "dpdt_max_slope_mmHg_per_s_corrected": m1,
@@ -1662,6 +1791,7 @@ def construct_rv_hmp_curve(
 def rv_single_beat_derivative_analysis(
     time_s: np.ndarray,
     pressure: np.ndarray,
+    stroke_volume_ml: float | None = None,
 ):
     """
     Beat-level visual feature detection for RV pressure and first-derivative landmarks.
@@ -1787,6 +1917,7 @@ def rv_single_beat_derivative_analysis(
             dpdt_min_idx,
             pressure_peak,
             beat_id,
+            stroke_volume_ml=stroke_volume_ml,
         )
         if hmp_df is not None:
             hmp_parts.append(hmp_df)
@@ -2776,6 +2907,17 @@ def render_visual_data_dictionary():
 
 def rv_flow_volume_loop_figure(rv_hmp: pd.DataFrame, theme: dict):
     fig = go.Figure()
+    use_calibrated = (
+        "remaining_sv_volume_ml" in rv_hmp.columns
+        and "flow_ml_per_s" in rv_hmp.columns
+        and np.isfinite(rv_hmp["remaining_sv_volume_ml"].to_numpy(float)).any()
+        and np.isfinite(rv_hmp["flow_ml_per_s"].to_numpy(float)).any()
+    )
+    x_col = "remaining_sv_volume_ml" if use_calibrated else "relative_volume_proxy"
+    y_col = "flow_ml_per_s" if use_calibrated else "uq_positive_proxy"
+    x_label = "SV-calibrated remaining volume excursion (mL)" if use_calibrated else "Relative volume proxy (unitless)"
+    y_label = "SV-calibrated flow proxy (mL/s)" if use_calibrated else "uQ+ proxy = max(HMP - Pv, 0)"
+    title = "SV-calibrated RV flow-volume proxy loop" if use_calibrated else "Uncalibrated RV flow-volume proxy loop"
     loop_colors = [
         theme["accent"],
         theme["landmark"],
@@ -2785,37 +2927,37 @@ def rv_flow_volume_loop_figure(rv_hmp: pd.DataFrame, theme: dict):
         theme["landmark_alt"],
     ]
     for i, (beat_id, beat_df) in enumerate(rv_hmp.groupby("beat_id", sort=True)):
-        loop_df = beat_df[["relative_volume_proxy", "uq_positive_proxy", "time_s"]].dropna()
+        loop_df = beat_df[[x_col, y_col, "time_s"]].dropna()
         if len(loop_df) < 3:
             continue
         color = loop_colors[i % len(loop_colors)]
         fig.add_trace(
             go.Scatter(
-                x=loop_df["relative_volume_proxy"],
-                y=loop_df["uq_positive_proxy"],
+                x=loop_df[x_col],
+                y=loop_df[y_col],
                 mode="lines",
                 name=f"Beat {int(beat_id)} loop",
                 line=dict(color=color, width=2.2),
                 customdata=loop_df["time_s"],
                 hovertemplate=(
-                    f"Beat {int(beat_id)}<br>Relative volume: %{{x:.3f}}<br>"
-                    "uQ+ proxy: %{y:.3f}<br>Time: %{customdata:.3f} s<extra></extra>"
+                    f"Beat {int(beat_id)}<br>{x_label}: %{{x:.3f}}<br>"
+                    f"{y_label}: %{{y:.3f}}<br>Time: %{{customdata:.3f}} s<extra></extra>"
                 ),
             )
         )
 
-        peak_flow_idx = int(np.nanargmax(beat_df["uq_positive_proxy"].to_numpy(float)))
+        peak_flow_idx = int(np.nanargmax(beat_df[y_col].to_numpy(float)))
         peak_row = beat_df.iloc[peak_flow_idx]
         fig.add_trace(
             go.Scatter(
-                x=[peak_row["relative_volume_proxy"]],
-                y=[peak_row["uq_positive_proxy"]],
+                x=[peak_row[x_col]],
+                y=[peak_row[y_col]],
                 mode="markers",
                 name=f"Beat {int(beat_id)} peak uQ",
                 marker=dict(color=color, size=8, symbol="triangle-up"),
                 hovertemplate=(
-                    f"Beat {int(beat_id)} peak uQ<br>Relative volume: %{{x:.3f}}<br>"
-                    "uQ+ proxy: %{y:.3f}<extra></extra>"
+                    f"Beat {int(beat_id)} peak flow<br>{x_label}: %{{x:.3f}}<br>"
+                    f"{y_label}: %{{y:.3f}}<extra></extra>"
                 ),
                 showlegend=False,
             )
@@ -2825,17 +2967,17 @@ def rv_flow_volume_loop_figure(rv_hmp: pd.DataFrame, theme: dict):
         if np.isfinite(esp_time):
             esp_idx = int(np.nanargmin(np.abs(beat_df["time_s"].to_numpy(float) - esp_time)))
             esp_row = beat_df.iloc[esp_idx]
-            if np.isfinite(esp_row["relative_volume_proxy"]) and np.isfinite(esp_row["uq_positive_proxy"]):
+            if np.isfinite(esp_row[x_col]) and np.isfinite(esp_row[y_col]):
                 fig.add_trace(
                     go.Scatter(
-                        x=[esp_row["relative_volume_proxy"]],
-                        y=[esp_row["uq_positive_proxy"]],
+                        x=[esp_row[x_col]],
+                        y=[esp_row[y_col]],
                         mode="markers",
                         name=f"Beat {int(beat_id)} ESP",
                         marker=dict(color=color, size=9, symbol="circle-open"),
                         hovertemplate=(
-                            f"Beat {int(beat_id)} ESP proxy<br>Relative volume: %{{x:.3f}}<br>"
-                            "uQ+ proxy: %{y:.3f}<extra></extra>"
+                            f"Beat {int(beat_id)} ESP proxy<br>{x_label}: %{{x:.3f}}<br>"
+                            f"{y_label}: %{{y:.3f}}<extra></extra>"
                         ),
                         showlegend=False,
                     )
@@ -2848,19 +2990,19 @@ def rv_flow_volume_loop_figure(rv_hmp: pd.DataFrame, theme: dict):
         font=dict(color=theme["text"]),
         height=430,
         margin=dict(t=50, b=60, l=65, r=30),
-        title=dict(text="Uncalibrated RV flow-volume proxy loop", x=0.02, xanchor="left"),
+        title=dict(text=title, x=0.02, xanchor="left"),
         hovermode="closest",
         legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
     )
     fig.update_xaxes(
-        title_text="Relative volume proxy (unitless)",
+        title_text=x_label,
         autorange="reversed",
         showgrid=True,
         gridcolor=theme["grid_major"],
         zeroline=False,
     )
     fig.update_yaxes(
-        title_text="uQ+ proxy = max(HMP - Pv, 0)",
+        title_text=y_label,
         showgrid=True,
         gridcolor=theme["grid_major"],
         zeroline=False,
@@ -3414,6 +3556,42 @@ with viewer_tab:
         }
         for up in reference_uploads
     ]
+    rhc_hemodynamics = [
+        extracted
+        for ref in reference_files
+        if ref["ext"] == ".pdf"
+        for extracted in [extract_rhc_hemodynamics_from_pdf(ref["data"], ref["name"])]
+        if extracted is not None
+    ]
+    detected_sv_values = [
+        float(item["stroke_volume_ml"])
+        for item in rhc_hemodynamics
+        if item.get("stroke_volume_ml") is not None and np.isfinite(float(item["stroke_volume_ml"]))
+    ]
+    detected_sv_ml = detected_sv_values[0] if detected_sv_values else 0.0
+    sv_key = f"rv_stroke_volume_calibration_ml_{case_key}"
+    if sv_key not in st.session_state and detected_sv_ml > 0:
+        st.session_state[sv_key] = float(detected_sv_ml)
+    with st.sidebar:
+        with st.expander("RV volume calibration", expanded=detected_sv_ml > 0):
+            if rhc_hemodynamics:
+                st.caption("Detected Fick hemodynamics from uploaded RHC PDF(s).")
+                st.dataframe(pd.DataFrame(rhc_hemodynamics), width="stretch", hide_index=True)
+            else:
+                st.caption("Upload the RHC results PDF to auto-detect Fick stroke volume, or enter it manually.")
+            stroke_volume_input_ml = st.number_input(
+                "Fick stroke volume for RV calibration (mL)",
+                min_value=0.0,
+                max_value=300.0,
+                step=0.1,
+                key=sv_key,
+                help="Used to scale the RV volume/flow proxy loop. Set to 0 to keep the RV loop uncalibrated.",
+            )
+            if stroke_volume_input_ml > 0:
+                st.caption("Volume/flow loop will be SV-calibrated as a stroke-volume excursion, not absolute EDV/ESV.")
+    stroke_volume_calibration_ml = float(st.session_state.get(sv_key, 0.0))
+    if not np.isfinite(stroke_volume_calibration_ml) or stroke_volume_calibration_ml <= 0:
+        stroke_volume_calibration_ml = None
 
     for up in uploaded:
         data = up.getvalue()
@@ -3889,6 +4067,7 @@ with viewer_tab:
                 rv_derivative_analysis = rv_single_beat_derivative_analysis(
                     aligned["time_s"].to_numpy(float),
                     aligned[pressure_col].to_numpy(float),
+                    stroke_volume_ml=stroke_volume_calibration_ml,
                 )
                 if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
                     rv_derivative_analysis = None
@@ -4164,8 +4343,8 @@ with viewer_tab:
                     "RV single-beat derivative view: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
                     "dP/dt max/min mark first-derivative IC/IR references. "
                     "The dashed HMP preview follows Kremer 2026's hydromotive-pressure concept using a cubic curve between dP/dt max and dP/dt min. "
-                    "The extra proxy row derives uQ = HMP - Pv, an uncalibrated relative-volume trace, elastance proxy, ESP proxy, and PBEF proxy; uQ and elastance are display-normalized so the traces can be read together. "
-                    "Calibrated volumes, Ees, Ea, and Ees/Ea remain disabled."
+                    "The extra proxy row derives uQ = HMP - Pv, relative-volume trace, elastance proxy, ESP proxy, and PBEF proxy; uQ and elastance are display-normalized so the traces can be read together. "
+                    "When Fick SV is provided, the flow-volume loop is scaled to that stroke-volume excursion. Absolute EDV/ESV, Ees, Ea, and Ees/Ea remain disabled."
                 )
                 if not rv_hmp.empty:
                     hmp_summary = (
@@ -4177,10 +4356,13 @@ with viewer_tab:
                                 "esp_proxy_mmHg",
                                 "esp_proxy_time_s",
                                 "pbef_proxy",
+                                "stroke_volume_calibration_ml",
                                 "stroke_volume_proxy_area",
                                 "peak_flow_proxy",
+                                "peak_flow_ml_per_s",
                                 "peak_flow_time_s",
                                 "flow_volume_loop_area_proxy",
+                                "flow_volume_loop_area_ml2_per_s",
                                 "max_elastance_proxy",
                                 "dpdt_max_time_s",
                                 "dpdt_min_time_s",
@@ -4200,8 +4382,8 @@ with viewer_tab:
                             key=f"rv_flow_volume_loop_{case_key}_{pressure_col}",
                         )
                         st.caption(
-                            "Loop uses relative volume proxy on the x-axis and uncalibrated uQ+ = max(HMP - RV pressure, 0) on the y-axis. "
-                            "It is useful for beat-shape review, but it is not calibrated volume or true flow."
+                            "Loop uses relative or SV-calibrated volume excursion on the x-axis and uQ+ = max(HMP - RV pressure, 0) on the y-axis. "
+                            "Fick SV calibration scales the excursion and flow proxy, but does not provide absolute EDV/ESV."
                         )
                 with st.expander("RV derivative feature times", expanded=False):
                     event_cols = [
