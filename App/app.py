@@ -18,8 +18,208 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.15"
+APP_VERSION = "v0.8.16"
 APP_VERSION_DATE = "2026-05-30"
+
+THEMES = {
+    "dark": {
+        "name": "dark",
+        "plotly_template": "plotly_dark",
+        "background": "#0A0F1E",
+        "card": "#1E2A3A",
+        "accent": "#00B4D8",
+        "text": "#F1F5F9",
+        "muted": "#94A3B8",
+        "border": "#334155",
+        "input": "#111827",
+        "button_text": "#03131C",
+        "pressure_trace": "#00B4D8",
+        "ecg_trace": "#F97316",
+        "rv_trace": "#F1F5F9",
+        "landmark": "#F97316",
+        "landmark_alt": "#00B4D8",
+        "success": "#22C55E",
+        "warning": "#F97316",
+        "danger": "#F43F5E",
+        "purple": "#D946EF",
+        "grid_major": "rgba(148, 163, 184, 0.24)",
+        "grid_minor": "rgba(148, 163, 184, 0.13)",
+        "spike": "rgba(241, 245, 249, 0.75)",
+        "selection_fill": "rgba(0, 180, 216, 0.18)",
+        "saved_fill": "rgba(249, 115, 22, 0.20)",
+        "r_wave": "rgba(0, 180, 216, 0.45)",
+    },
+    "light": {
+        "name": "light",
+        "plotly_template": "plotly_white",
+        "background": "#FFFFFF",
+        "card": "#F8FAFC",
+        "accent": "#0369A1",
+        "text": "#0F172A",
+        "muted": "#64748B",
+        "border": "#E2E8F0",
+        "input": "#FFFFFF",
+        "button_text": "#FFFFFF",
+        "pressure_trace": "#1D4ED8",
+        "ecg_trace": "#DC2626",
+        "rv_trace": "#0F172A",
+        "landmark": "#DC2626",
+        "landmark_alt": "#1D4ED8",
+        "success": "#15803D",
+        "warning": "#D97706",
+        "danger": "#DC2626",
+        "purple": "#7C3AED",
+        "grid_major": "rgba(65, 65, 65, 0.24)",
+        "grid_minor": "rgba(90, 90, 90, 0.16)",
+        "spike": "rgba(15, 23, 42, 0.75)",
+        "selection_fill": "rgba(3, 105, 161, 0.14)",
+        "saved_fill": "rgba(220, 38, 38, 0.13)",
+        "r_wave": "rgba(29, 78, 216, 0.35)",
+    },
+}
+
+
+def hex_to_rgba(hex_color: str, alpha: float) -> str:
+    color = hex_color.strip().lstrip("#")
+    if len(color) != 6:
+        return hex_color
+    r = int(color[0:2], 16)
+    g = int(color[2:4], 16)
+    b = int(color[4:6], 16)
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def active_theme():
+    return THEMES["dark" if st.session_state.get("dark_mode", False) else "light"]
+
+
+def inject_theme_css(theme: dict):
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --app-bg: {theme["background"]};
+            --app-card: {theme["card"]};
+            --app-accent: {theme["accent"]};
+            --app-text: {theme["text"]};
+            --app-muted: {theme["muted"]};
+            --app-border: {theme["border"]};
+            --app-input: {theme["input"]};
+            --app-button-text: {theme["button_text"]};
+        }}
+        html, body, [data-testid="stAppViewContainer"], .stApp {{
+            background-color: var(--app-bg);
+            color: var(--app-text);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }}
+        [data-testid="stHeader"] {{
+            background-color: {hex_to_rgba(theme["background"], 0.86)};
+            transition: background-color 0.3s ease;
+        }}
+        [data-testid="stSidebar"], [data-testid="stSidebarContent"] {{
+            background-color: var(--app-card);
+            color: var(--app-text);
+            transition: background-color 0.3s ease, color 0.3s ease;
+        }}
+        [data-testid="stSidebar"] * {{
+            color: var(--app-text);
+        }}
+        .stMarkdown, .stCaption, p, label, span, div {{
+            color: inherit;
+        }}
+        h1, h2, h3, h4, h5, h6, [data-testid="stMarkdownContainer"] strong {{
+            color: var(--app-text);
+        }}
+        [data-testid="stCaptionContainer"], .stCaption, small {{
+            color: var(--app-muted) !important;
+        }}
+        [data-testid="stExpander"], [data-testid="stForm"], div[data-testid="stVerticalBlockBorderWrapper"] {{
+            background-color: var(--app-card);
+            border-color: var(--app-border);
+            border-radius: 8px;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }}
+        [data-testid="stMetric"], .theme-metric-card {{
+            background-color: var(--app-card);
+            border: 1px solid var(--app-border);
+            border-radius: 8px;
+            padding: 0.85rem 1rem;
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }}
+        .theme-metric-label {{
+            color: var(--app-muted);
+            font-size: 0.78rem;
+            line-height: 1.1;
+            margin-bottom: 0.35rem;
+        }}
+        .theme-metric-value {{
+            color: var(--app-text);
+            font-size: 1.55rem;
+            font-weight: 700;
+            line-height: 1.15;
+        }}
+        .stButton > button, .stDownloadButton > button {{
+            background-color: var(--app-accent);
+            color: var(--app-button-text);
+            border: 1px solid var(--app-accent);
+            border-radius: 8px;
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+        }}
+        .stButton > button:hover, .stDownloadButton > button:hover {{
+            background-color: {hex_to_rgba(theme["accent"], 0.88)};
+            border-color: var(--app-accent);
+            color: var(--app-button-text);
+        }}
+        .stTextInput input, .stNumberInput input, .stTextArea textarea,
+        [data-baseweb="select"] > div, [data-baseweb="base-input"] {{
+            background-color: var(--app-input);
+            color: var(--app-text);
+            border-color: var(--app-border);
+            transition: background-color 0.3s ease, border-color 0.3s ease, color 0.3s ease;
+        }}
+        [data-testid="stTabs"] [role="tablist"] {{
+            border-bottom: 1px solid var(--app-border);
+        }}
+        [data-testid="stTabs"] [role="tab"] {{
+            color: var(--app-muted);
+        }}
+        [data-testid="stTabs"] [aria-selected="true"] {{
+            color: var(--app-accent);
+            border-bottom-color: var(--app-accent);
+        }}
+        [data-testid="stDataFrame"], [data-testid="stTable"] {{
+            border: 1px solid var(--app-border);
+            border-radius: 8px;
+            overflow: hidden;
+            background-color: var(--app-card);
+            transition: background-color 0.3s ease, border-color 0.3s ease;
+        }}
+        hr, .themed-header {{
+            border-color: var(--app-border);
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_card(label: str, value):
+    st.markdown(
+        f"""
+        <div class="theme-metric-card">
+            <div class="theme-metric-label">{html.escape(str(label))}</div>
+            <div class="theme-metric-value">{html.escape(str(value))}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_metric_cards(items: list[tuple[str, object]], columns: int | None = None):
+    cols = st.columns(columns or len(items))
+    for col, (label, value) in zip(cols, items):
+        with col:
+            render_metric_card(label, value)
 
 
 def trapezoid_area(y, x):
@@ -741,6 +941,7 @@ def segment_signal_columns(df: pd.DataFrame):
 
 
 def labeled_interval_figure(segment_df: pd.DataFrame, title: str = "Labeled waveform segment"):
+    theme = active_theme()
     signal_cols = segment_signal_columns(segment_df)
     pressure_cols = sorted([c for c in signal_cols if "EKG" not in c.upper()], key=pressure_sort_key)
     ecg_cols = sorted([c for c in signal_cols if "EKG" in c.upper()])
@@ -765,6 +966,7 @@ def labeled_interval_figure(segment_df: pd.DataFrame, title: str = "Labeled wave
                 y=segment_df[c],
                 mode="lines",
                 name=c,
+                line=dict(color=theme["ecg_trace"] if is_ecg else theme["pressure_trace"], width=1.6),
                 hovertemplate=f"Time: %{{x:.3f}} s<br>{c}: %{{y:.3f}}<extra></extra>",
             ),
             row=row,
@@ -779,6 +981,10 @@ def labeled_interval_figure(segment_df: pd.DataFrame, title: str = "Labeled wave
         fig.update_yaxes(title_text="Value", row=1, col=1)
 
     fig.update_layout(
+        template=theme["plotly_template"],
+        paper_bgcolor=theme["background"],
+        plot_bgcolor=theme["card"],
+        font=dict(color=theme["text"]),
         title=title,
         height=460 if rows == 2 else 330,
         hovermode="x",
@@ -796,11 +1002,16 @@ def build_labeled_visualizations_html(
     if raw_labeled_segments.empty:
         return ""
 
+    theme = active_theme()
     parts = [
         "<!doctype html><html><head><meta charset='utf-8'>",
         "<title>Labeled waveform segments</title>",
-        "<style>body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:28px;color:#111827;}"
-        ".segment{margin:0 0 42px;} h1{margin-bottom:0.2rem;} .meta{color:#6b7280;margin-bottom:2rem;}</style>",
+        "<style>"
+        f"body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:28px;color:{theme['text']};background:{theme['background']};}}"
+        f".segment{{margin:0 0 42px;background:{theme['card']};border:1px solid {theme['border']};border-radius:8px;padding:12px;}}"
+        "h1{margin-bottom:0.2rem;}"
+        f".meta{{color:{theme['muted']};margin-bottom:2rem;}}"
+        "</style>",
         "</head><body>",
         "<h1>Labeled waveform segments</h1>",
         f"<div class='meta'>Patient/case: {html.escape(patient_id or 'Unknown')}"
@@ -862,7 +1073,7 @@ def render_institutional_header():
     )
     st.markdown(
         f"""
-        <div style="
+        <div class="themed-header" style="
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -870,7 +1081,7 @@ def render_institutional_header():
             flex-wrap: wrap;
             padding: 0.35rem 0 0.9rem;
             margin-bottom: 0.25rem;
-            border-bottom: 1px solid rgba(49, 51, 63, 0.12);
+            border-bottom: 1px solid {active_theme()["border"]};
         ">
             {logo_html}
         </div>
@@ -2312,7 +2523,12 @@ def schematic_waveform():
 
 
 def apply_dictionary_figure_style(fig, title: str):
+    theme = active_theme()
     fig.update_layout(
+        template=theme["plotly_template"],
+        paper_bgcolor=theme["background"],
+        plot_bgcolor=theme["card"],
+        font=dict(color=theme["text"]),
         title=dict(text=title, x=0.02, xanchor="left", font=dict(size=15)),
         height=300,
         margin=dict(l=38, r=18, t=48, b=38),
@@ -2323,59 +2539,62 @@ def apply_dictionary_figure_style(fig, title: str):
     fig.update_xaxes(
         title_text="Time",
         showgrid=True,
-        gridcolor="rgba(65, 65, 65, 0.18)",
+        gridcolor=theme["grid_major"],
         zeroline=False,
     )
     fig.update_yaxes(
         title_text="Pressure",
         showgrid=True,
-        gridcolor="rgba(65, 65, 65, 0.18)",
+        gridcolor=theme["grid_major"],
         zeroline=False,
     )
     return fig
 
 
 def auc_to_zero_cartoon():
+    theme = active_theme()
     t, y, _, _ = schematic_waveform()
     zero = np.zeros_like(t)
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=zero, mode="lines", line=dict(color="rgba(80,80,80,0.65)", width=1), name="Zero line"))
+    fig.add_trace(go.Scatter(x=t, y=zero, mode="lines", line=dict(color=theme["muted"], width=1), name="Zero line"))
     fig.add_trace(
         go.Scatter(
             x=np.concatenate([t, t[::-1]]),
             y=np.concatenate([y, zero[::-1]]),
             fill="toself",
-            fillcolor="rgba(58, 134, 255, 0.22)",
-            line=dict(color="rgba(58, 134, 255, 0)"),
+            fillcolor=hex_to_rgba(theme["accent"], 0.22),
+            line=dict(color=hex_to_rgba(theme["accent"], 0.0)),
             name="AUC to zero",
         )
     )
-    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(20,20,20)", width=2.4), name="Pressure waveform"))
+    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color=theme["pressure_trace"], width=2.4), name="Pressure waveform"))
     fig.add_annotation(x=3.0, y=8.0, text="Total pressure-time burden", showarrow=False, font=dict(size=13))
     return apply_dictionary_figure_style(fig, "raw_auc_to_zero")
 
 
 def auc_to_baseline_cartoon():
+    theme = active_theme()
     t, y, baseline, linear_baseline = schematic_waveform()
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=baseline, mode="lines", line=dict(color="rgb(16, 130, 92)", width=2, dash="dash"), name="Start/baseline reference"))
+    fig.add_trace(go.Scatter(x=t, y=baseline, mode="lines", line=dict(color=theme["success"], width=2, dash="dash"), name="Start/baseline reference"))
     fig.add_trace(
         go.Scatter(
             x=np.concatenate([t, t[::-1]]),
             y=np.concatenate([y, baseline[::-1]]),
             fill="toself",
-            fillcolor="rgba(16, 185, 129, 0.24)",
-            line=dict(color="rgba(16, 185, 129, 0)"),
+            fillcolor=hex_to_rgba(theme["success"], 0.24),
+            line=dict(color=hex_to_rgba(theme["success"], 0.0)),
             name="Area above baseline",
         )
     )
-    fig.add_trace(go.Scatter(x=t, y=linear_baseline, mode="lines", line=dict(color="rgb(245, 125, 40)", width=2, dash="dot"), name="Linear local baseline"))
-    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(20,20,20)", width=2.4), name="Pressure waveform"))
+    fig.add_trace(go.Scatter(x=t, y=linear_baseline, mode="lines", line=dict(color=theme["warning"], width=2, dash="dot"), name="Linear local baseline"))
+    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color=theme["pressure_trace"], width=2.4), name="Pressure waveform"))
     fig.add_annotation(x=3.3, y=34.0, text="V-wave excess area", showarrow=True, ax=40, ay=-40, font=dict(size=13))
     return apply_dictionary_figure_style(fig, "auc_above_baseline / excess_auc_linear_baseline_positive")
 
 
 def slope_peak_cartoon():
+    theme = active_theme()
     t, y, _, linear_baseline = schematic_waveform()
     excess = y - linear_baseline
     peak_idx = int(np.nanargmax(excess))
@@ -2391,17 +2610,18 @@ def slope_peak_cartoon():
     right_t = float(t[above_half[-1]])
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=linear_baseline, mode="lines", line=dict(color="rgb(130,130,130)", width=2, dash="dot"), name="Linear baseline"))
-    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color="rgb(20,20,20)", width=2.4), name="Pressure waveform"))
-    fig.add_trace(go.Scatter(x=[start_t, peak_t], y=[start_y, peak_y], mode="lines+markers", line=dict(color="rgb(220, 38, 38)", width=3), name="Rise slope"))
-    fig.add_trace(go.Scatter(x=[peak_t, end_t], y=[peak_y, end_y], mode="lines+markers", line=dict(color="rgb(37, 99, 235)", width=3), name="Fall slope"))
-    fig.add_trace(go.Scatter(x=[left_t, right_t], y=[half_height, half_height], mode="lines", line=dict(color="rgb(124, 58, 237)", width=4), name="FWHM"))
+    fig.add_trace(go.Scatter(x=t, y=linear_baseline, mode="lines", line=dict(color=theme["muted"], width=2, dash="dot"), name="Linear baseline"))
+    fig.add_trace(go.Scatter(x=t, y=y, mode="lines", line=dict(color=theme["pressure_trace"], width=2.4), name="Pressure waveform"))
+    fig.add_trace(go.Scatter(x=[start_t, peak_t], y=[start_y, peak_y], mode="lines+markers", line=dict(color=theme["landmark"], width=3), name="Rise slope"))
+    fig.add_trace(go.Scatter(x=[peak_t, end_t], y=[peak_y, end_y], mode="lines+markers", line=dict(color=theme["landmark_alt"], width=3), name="Fall slope"))
+    fig.add_trace(go.Scatter(x=[left_t, right_t], y=[half_height, half_height], mode="lines", line=dict(color=theme["purple"], width=4), name="FWHM"))
     fig.add_annotation(x=peak_t, y=peak_y, text="Peak above baseline", showarrow=True, ax=30, ay=-35, font=dict(size=13))
     fig.add_annotation(x=(left_t + right_t) / 2, y=half_height, text="Width at half max", showarrow=True, ax=0, ay=35, font=dict(size=13))
     return apply_dictionary_figure_style(fig, "peak, slope, and width metrics")
 
 
 def ecg_timing_cartoon():
+    theme = active_theme()
     t = np.linspace(0, 6.0, 600)
     ecg = np.zeros_like(t)
     r_times = np.array([1.0, 2.25, 3.5, 4.75])
@@ -2414,12 +2634,12 @@ def ecg_timing_cartoon():
     next_r = float(r_times[r_times > peak_t][0])
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=t, y=ecg + 4.0, mode="lines", line=dict(color="rgb(37, 99, 235)", width=1.8), name="Same-file ECG"))
-    fig.add_trace(go.Scatter(x=t, y=pressure, mode="lines", line=dict(color="rgb(20,20,20)", width=2.4), name="PCWP pressure"))
+    fig.add_trace(go.Scatter(x=t, y=ecg + 4.0, mode="lines", line=dict(color=theme["ecg_trace"], width=1.8), name="Same-file ECG"))
+    fig.add_trace(go.Scatter(x=t, y=pressure, mode="lines", line=dict(color=theme["pressure_trace"], width=2.4), name="PCWP pressure"))
     for rt in r_times:
-        fig.add_vline(x=rt, line_color="rgba(37, 99, 235, 0.45)", line_dash="dot", line_width=1)
-    fig.add_vrect(x0=prev_r, x1=peak_t, fillcolor="rgba(245, 158, 11, 0.22)", line_width=0)
-    fig.add_vrect(x0=prev_r, x1=next_r, fillcolor="rgba(37, 99, 235, 0.08)", line_width=0)
+        fig.add_vline(x=rt, line_color=theme["r_wave"], line_dash="dot", line_width=1)
+    fig.add_vrect(x0=prev_r, x1=peak_t, fillcolor=hex_to_rgba(theme["warning"], 0.22), line_width=0)
+    fig.add_vrect(x0=prev_r, x1=next_r, fillcolor=hex_to_rgba(theme["accent"], 0.08), line_width=0)
     fig.add_annotation(x=(prev_r + peak_t) / 2, y=3.05, text="QRS to excess peak", showarrow=False, font=dict(size=13))
     fig.add_annotation(x=(prev_r + next_r) / 2, y=4.9, text="RR cycle for normalized phase", showarrow=False, font=dict(size=13))
     return apply_dictionary_figure_style(fig, "qrs_to_excess_peak_ms / cycle_normalized_excess_peak_phase")
@@ -2523,6 +2743,18 @@ def get_recommended_feature_set():
 # -----------------------------
 
 st.set_page_config(page_title="Hemodynamic RHC Viewer", layout="wide")
+
+if "dark_mode" not in st.session_state:
+    st.session_state.dark_mode = False
+
+with st.sidebar:
+    _, theme_toggle_col = st.columns([1, 1])
+    with theme_toggle_col:
+        st.toggle("🌙 Dark Mode", key="dark_mode")
+
+ACTIVE_THEME = active_theme()
+pio.templates.default = ACTIVE_THEME["plotly_template"]
+inject_theme_css(ACTIVE_THEME)
 
 require_password_if_configured()
 
@@ -2647,11 +2879,15 @@ with database_tab:
 
     db_segments = load_database_segments(db_path)
     summary = database_summary(db_path)
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Rows", summary["rows"])
-    m2.metric("Cases", summary["cases"])
-    m3.metric("Intervals", summary["intervals"])
-    st.metric("Saved waveform samples", len(db_segments))
+    render_metric_cards(
+        [
+            ("Rows", summary["rows"]),
+            ("Cases", summary["cases"]),
+            ("Intervals", summary["intervals"]),
+            ("Saved waveform samples", len(db_segments)),
+        ],
+        columns=4,
+    )
 
     db_rows = load_database_rows(db_path)
     if db_rows.empty:
@@ -3328,13 +3564,14 @@ with viewer_tab:
     st.subheader("Waveform viewer with synchronized dual cursors")
     st.caption("Each pressure waveform is paired with the EKG from the same PW6 file when available. The timing slider sits directly below the pressure it shifts.")
 
-    major_grid = "rgba(65, 65, 65, 0.24)"
-    minor_grid = "rgba(90, 90, 90, 0.16)"
+    chart_theme = active_theme()
+    major_grid = chart_theme["grid_major"]
+    minor_grid = chart_theme["grid_minor"]
     spike_style = dict(
         showspikes=True,
         spikemode="across",
         spikesnap="cursor",
-        spikecolor="rgba(0, 0, 0, 0.75)",
+        spikecolor=chart_theme["spike"],
         spikedash="solid",
         spikethickness=1,
     )
@@ -3342,18 +3579,17 @@ with viewer_tab:
     def decorate_waveform_figure(fig, bottom_row: int):
         if not r_waves.empty:
             for rt in r_waves["r_time_s"].to_list():
-                fig.add_vline(x=rt, line_width=1, line_dash="dot", line_color="rgba(0,0,180,0.35)")
+                fig.add_vline(x=rt, line_width=1, line_dash="dot", line_color=chart_theme["r_wave"])
 
-        fig.add_vrect(x0=lo, x1=hi, fillcolor="gray", opacity=0.15, line_width=0)
-        fig.add_vline(x=lo, line_width=2, line_dash="dash", line_color="black")
-        fig.add_vline(x=hi, line_width=2, line_dash="dash", line_color="black")
+        fig.add_vrect(x0=lo, x1=hi, fillcolor=chart_theme["selection_fill"], line_width=0)
+        fig.add_vline(x=lo, line_width=2, line_dash="dash", line_color=chart_theme["accent"])
+        fig.add_vline(x=hi, line_width=2, line_dash="dash", line_color=chart_theme["accent"])
 
         for item in st.session_state.intervals:
             fig.add_vrect(
                 x0=item["start_s"],
                 x1=item["end_s"],
-                fillcolor="LightSalmon",
-                opacity=0.18,
+                fillcolor=chart_theme["saved_fill"],
                 line_width=0,
             )
             fig.add_annotation(
@@ -3363,7 +3599,7 @@ with viewer_tab:
                 yref="paper",
                 text=item["label"],
                 showarrow=False,
-                font=dict(size=11),
+                font=dict(size=11, color=chart_theme["text"]),
             )
 
         fig.update_xaxes(
@@ -3387,6 +3623,10 @@ with viewer_tab:
         )
 
         fig.update_layout(
+            template=chart_theme["plotly_template"],
+            paper_bgcolor=chart_theme["background"],
+            plot_bgcolor=chart_theme["card"],
+            font=dict(color=chart_theme["text"]),
             height=max(280, 170 * bottom_row + 100),
             hovermode="x",
             legend=dict(orientation="h", yanchor="top", y=-0.22, xanchor="center", x=0.5),
@@ -3406,11 +3646,15 @@ with viewer_tab:
     if waveform_tabs:
         with waveform_tabs[0]:
             st.markdown("**Current waveform workspace**")
-            overview_cols = st.columns(4)
-            overview_cols[0].metric("Pressure tabs", len(rendered_pressure_cols))
-            overview_cols[1].metric("Displayed channels", len(display_signal_cols))
-            overview_cols[2].metric("Labeled intervals", len(st.session_state.intervals))
-            overview_cols[3].metric("References", len(reference_files))
+            render_metric_cards(
+                [
+                    ("Pressure tabs", len(rendered_pressure_cols)),
+                    ("Displayed channels", len(display_signal_cols)),
+                    ("Labeled intervals", len(st.session_state.intervals)),
+                    ("References", len(reference_files)),
+                ],
+                columns=4,
+            )
             overview_rows = []
             for col in rendered_pressure_cols:
                 source = pressure_source_by_col.get(col, {})
@@ -3479,7 +3723,7 @@ with viewer_tab:
                         y=ecg_values,
                         mode="lines",
                         name=ecg_name,
-                        line=dict(color="rgba(30, 90, 200, 0.75)", width=1.2),
+                        line=dict(color=chart_theme["ecg_trace"], width=1.2),
                         hovertemplate=f"Time: %{{x:.3f}} s<br>{ecg_name}: %{{y:.3f}} mV<extra></extra>",
                     ),
                     row=1,
@@ -3493,6 +3737,7 @@ with viewer_tab:
                     y=aligned[pressure_col],
                     mode="lines",
                     name=f"Pressure from {pressure_label}",
+                    line=dict(color=chart_theme["pressure_trace"], width=1.8),
                     hovertemplate=f"Time: %{{x:.3f}} s<br>{pressure_col}: %{{y:.3f}} mmHg<extra></extra>",
                 ),
                 row=pressure_row,
@@ -3515,7 +3760,7 @@ with viewer_tab:
                         y=rv_derivatives["rv_pressure_smooth_mmHg"],
                         mode="lines",
                         name="RV pressure for beat landmark review",
-                        line=dict(color="rgba(20, 20, 20, 0.82)", width=1.7),
+                        line=dict(color=chart_theme["rv_trace"], width=1.7),
                         hovertemplate="Time: %{x:.3f} s<br>RV pressure: %{y:.2f} mmHg<extra></extra>",
                     ),
                     row=peak_fit_row,
@@ -3530,7 +3775,7 @@ with viewer_tab:
                             y=measured_peaks["value"],
                             mode="markers",
                             name="Measured RV peak",
-                            marker=dict(color="rgb(220, 38, 38)", size=8, symbol="triangle-up"),
+                            marker=dict(color=chart_theme["landmark"], size=8, symbol="triangle-up"),
                             hovertemplate="Beat %{customdata}: measured RV peak<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
                             customdata=measured_peaks["beat_id"],
                         ),
@@ -3545,7 +3790,7 @@ with viewer_tab:
                             y=pes_events["value"],
                             mode="markers",
                             name="Pes estimate",
-                            marker=dict(color="rgb(14, 116, 144)", size=9, symbol="square"),
+                            marker=dict(color=chart_theme["accent"], size=9, symbol="square"),
                             hovertemplate="Beat %{customdata}: Pes estimate<br>Time: %{x:.3f} s<br>Pes: %{y:.2f} mmHg<extra></extra>",
                             customdata=pes_events["beat_id"],
                         ),
@@ -3560,7 +3805,7 @@ with viewer_tab:
                                 y=hmp_df["hmp_mmHg"],
                                 mode="lines",
                                 name=f"Beat {int(beat_id)} HMP",
-                                line=dict(color="rgb(217, 70, 239)", width=2.7, dash="dash"),
+                                line=dict(color=chart_theme["purple"], width=2.7, dash="dash"),
                                 hovertemplate=(
                                     f"Beat {int(beat_id)} HMP preview<br>Time: %{{x:.3f}} s<br>"
                                     "HMP: %{y:.2f} mmHg<extra></extra>"
@@ -3578,7 +3823,7 @@ with viewer_tab:
                                 y=hmp_peaks["value"],
                                 mode="markers",
                                 name="HMP Pmax preview",
-                                marker=dict(color="rgb(217, 70, 239)", size=11, symbol="star"),
+                                marker=dict(color=chart_theme["purple"], size=11, symbol="star"),
                                 hovertemplate="Beat %{customdata}: HMP Pmax preview<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
                                 customdata=hmp_peaks["beat_id"],
                             ),
@@ -3593,7 +3838,7 @@ with viewer_tab:
                             y=fit_limits["value"],
                             mode="markers",
                             name="First-derivative IC/IR limits",
-                            marker=dict(color="rgb(37, 99, 235)", size=7, symbol="x"),
+                            marker=dict(color=chart_theme["landmark_alt"], size=7, symbol="x"),
                             hovertemplate="%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
                             text=fit_limits["event"],
                             customdata=fit_limits["beat_id"],
@@ -3609,7 +3854,7 @@ with viewer_tab:
                         y=rv_derivatives["rv_dpdt_mmHg_per_s"],
                         mode="lines",
                         name="RV dP/dt",
-                        line=dict(color="rgb(16, 130, 92)", width=1.5),
+                        line=dict(color=chart_theme["success"], width=1.5),
                         hovertemplate="Time: %{x:.3f} s<br>dP/dt: %{y:.1f} mmHg/s<extra></extra>",
                     ),
                     row=dpdt_row,
@@ -3617,7 +3862,7 @@ with viewer_tab:
                 )
                 first_events = rv_events[rv_events["row"] == "dpdt"]
                 for _, event in first_events.iterrows():
-                    color = "rgb(220, 38, 38)" if event["event"] == "dP/dt max" else "rgb(37, 99, 235)"
+                    color = chart_theme["landmark"] if event["event"] == "dP/dt max" else chart_theme["landmark_alt"]
                     fig.add_trace(
                         go.Scatter(
                             x=[event["time_s"]],
@@ -3720,6 +3965,7 @@ with viewer_tab:
                     y=aligned[ecg_display_col],
                     mode="lines",
                     name=ecg_display_col,
+                    line=dict(color=chart_theme["ecg_trace"], width=1.5),
                     hovertemplate=f"Time: %{{x:.3f}} s<br>{ecg_display_col}: %{{y:.3f}} mV<extra></extra>",
                 ),
                 row=1,

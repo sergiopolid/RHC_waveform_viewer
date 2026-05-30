@@ -208,6 +208,12 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
+## Light/dark theme toggle added in v0.8.16
+
+The sidebar includes a `Dark Mode` toggle stored in `st.session_state.dark_mode`. Both light and dark modes are driven from a single Python theme dictionary that controls Streamlit CSS, metric cards, dataframes, tabs, inputs, buttons, and Plotly chart templates.
+
+Waveform traces, cursor shading, labeled interval shading, RV derivative landmarks, and data-dictionary cartoons switch colors with the active theme.
+
 ## RV derivative and HMP preview updated in v0.8.15
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:
