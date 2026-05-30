@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.3"
+APP_VERSION = "v0.8.4"
 APP_VERSION_DATE = "2026-05-29"
 
 
@@ -1198,11 +1198,12 @@ def zscore_signal(y: np.ndarray):
     return (filled - center) / spread
 
 
-def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray):
+def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray, r_wave_times: np.ndarray | None = None):
     """
-    Visual feature detection for the Bellofiore RV single-beat methods.
-    This identifies dP/dt extrema and candidate second-derivative minima; it
-    does not yet fit the isovolumic sine wave or calculate Ees/Piso.
+    Beat-level visual feature detection for the Bellofiore RV single-beat methods.
+    Consecutive R waves define each beat window. Within each QRS-to-QRS window,
+    identify dP/dt extrema and candidate second-derivative minima. This does not
+    yet fit the isovolumic sine wave or calculate Ees/Piso.
     """
     t = np.asarray(time_s, dtype=float)
     p = np.asarray(pressure, dtype=float)
@@ -1244,61 +1245,6 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray)
     dpdt = np.gradient(p_smooth, t_ok)
     d2pdt2 = np.gradient(dpdt, t_ok)
 
-    events = []
-    dpdt_max_idx = int(np.nanargmax(dpdt))
-    dpdt_min_idx = int(np.nanargmin(dpdt))
-    pressure_peak_idx = int(np.nanargmax(p_smooth))
-    events.extend(
-        [
-            {
-                "event": "dP/dt max",
-                "method": "First derivative",
-                "time_s": float(t_ok[dpdt_max_idx]),
-                "value": float(dpdt[dpdt_max_idx]),
-                "row": "dpdt",
-                "description": "Isovolumic contraction reference",
-            },
-            {
-                "event": "dP/dt min",
-                "method": "First derivative",
-                "time_s": float(t_ok[dpdt_min_idx]),
-                "value": float(dpdt[dpdt_min_idx]),
-                "row": "dpdt",
-                "description": "Isovolumic relaxation reference",
-            },
-        ]
-    )
-
-    second_derivative_minima = []
-    if find_peaks is not None:
-        distance = max(1, int(round(0.10 / dt)))
-        prominence = max(np.nanstd(d2pdt2) * 0.35, (np.nanpercentile(d2pdt2, 75) - np.nanpercentile(d2pdt2, 25)) * 0.35)
-        peaks, _ = find_peaks(-d2pdt2, distance=distance, prominence=prominence)
-        second_derivative_minima = [int(i) for i in peaks]
-
-    if not second_derivative_minima:
-        second_derivative_minima = list(range(len(t_ok)))
-
-    opening_candidates = [i for i in second_derivative_minima if i < pressure_peak_idx]
-    closing_candidates = [i for i in second_derivative_minima if i > pressure_peak_idx]
-    selected_minima = []
-    if opening_candidates:
-        selected_minima.append(("PV opening candidate", min(opening_candidates, key=lambda i: d2pdt2[i])))
-    if closing_candidates:
-        selected_minima.append(("PV closing candidate", min(closing_candidates, key=lambda i: d2pdt2[i])))
-
-    for label, idx in selected_minima:
-        events.append(
-            {
-                "event": label,
-                "method": "Second derivative",
-                "time_s": float(t_ok[idx]),
-                "value": float(d2pdt2[idx]),
-                "row": "d2pdt2",
-                "description": "Candidate sharp slope-change point",
-            }
-        )
-
     derivative_df = pd.DataFrame(
         {
             "time_s": t_ok,
@@ -1307,6 +1253,111 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray)
             "rv_d2pdt2_mmHg_per_s2": d2pdt2,
         }
     )
+
+    r_times = np.asarray([] if r_wave_times is None else r_wave_times, dtype=float)
+    r_times = np.sort(r_times[np.isfinite(r_times)])
+    r_times = r_times[(r_times >= t_ok[0]) & (r_times <= t_ok[-1])]
+    if len(r_times) < 2:
+        return derivative_df, pd.DataFrame()
+
+    events = []
+    beat_id = 0
+    for beat_start, beat_end in zip(r_times[:-1], r_times[1:]):
+        rr_s = float(beat_end - beat_start)
+        if rr_s < 0.40 or rr_s > 1.80:
+            continue
+
+        beat_mask = (t_ok >= beat_start) & (t_ok < beat_end)
+        beat_indices = np.flatnonzero(beat_mask)
+        if len(beat_indices) < 12:
+            continue
+
+        beat_id += 1
+        pressure_peak_idx = int(beat_indices[np.nanargmax(p_smooth[beat_indices])])
+        early_indices = beat_indices[t_ok[beat_indices] <= beat_start + 0.65 * rr_s]
+        if len(early_indices) < 4:
+            early_indices = beat_indices
+        late_indices = beat_indices[t_ok[beat_indices] >= t_ok[pressure_peak_idx]]
+        if len(late_indices) < 4:
+            late_indices = beat_indices
+
+        dpdt_max_idx = int(early_indices[np.nanargmax(dpdt[early_indices])])
+        dpdt_min_idx = int(late_indices[np.nanargmin(dpdt[late_indices])])
+
+        base_event = {
+            "beat_id": beat_id,
+            "rr_start_s": float(beat_start),
+            "rr_end_s": float(beat_end),
+            "rr_duration_s": rr_s,
+        }
+        events.extend(
+            [
+                {
+                    **base_event,
+                    "event": "dP/dt max",
+                    "method": "First derivative",
+                    "time_s": float(t_ok[dpdt_max_idx]),
+                    "value": float(dpdt[dpdt_max_idx]),
+                    "row": "dpdt",
+                    "description": "Beat-level isovolumic contraction reference",
+                },
+                {
+                    **base_event,
+                    "event": "dP/dt min",
+                    "method": "First derivative",
+                    "time_s": float(t_ok[dpdt_min_idx]),
+                    "value": float(dpdt[dpdt_min_idx]),
+                    "row": "dpdt",
+                    "description": "Beat-level isovolumic relaxation reference",
+                },
+            ]
+        )
+
+        second_derivative_minima = []
+        if find_peaks is not None:
+            beat_d2 = d2pdt2[beat_indices]
+            distance = max(1, int(round(0.08 / dt)))
+            iqr = np.nanpercentile(beat_d2, 75) - np.nanpercentile(beat_d2, 25)
+            prominence = max(np.nanstd(beat_d2) * 0.25, iqr * 0.25)
+            peaks, _ = find_peaks(-beat_d2, distance=distance, prominence=prominence)
+            second_derivative_minima = [int(beat_indices[i]) for i in peaks]
+
+        if not second_derivative_minima:
+            second_derivative_minima = list(beat_indices)
+
+        opening_candidates = [
+            i for i in second_derivative_minima
+            if t_ok[dpdt_max_idx] <= t_ok[i] <= t_ok[pressure_peak_idx]
+        ]
+        if not opening_candidates:
+            opening_candidates = [i for i in second_derivative_minima if i < pressure_peak_idx]
+
+        closing_candidates = [
+            i for i in second_derivative_minima
+            if t_ok[pressure_peak_idx] <= t_ok[i] <= t_ok[dpdt_min_idx]
+        ]
+        if not closing_candidates:
+            closing_candidates = [i for i in second_derivative_minima if i > pressure_peak_idx]
+
+        selected_minima = []
+        if opening_candidates:
+            selected_minima.append(("PV opening candidate", min(opening_candidates, key=lambda i: d2pdt2[i])))
+        if closing_candidates:
+            selected_minima.append(("PV closing candidate", min(closing_candidates, key=lambda i: d2pdt2[i])))
+
+        for label, idx in selected_minima:
+            events.append(
+                {
+                    **base_event,
+                    "event": label,
+                    "method": "Second derivative",
+                    "time_s": float(t_ok[idx]),
+                    "value": float(d2pdt2[idx]),
+                    "row": "d2pdt2",
+                    "description": "Beat-level candidate sharp slope-change point",
+                }
+            )
+
     return derivative_df, pd.DataFrame(events)
 
 
@@ -3143,9 +3194,19 @@ with viewer_tab:
             ecg_values = aligned[ecg_col]
             ecg_name = f"EKG reference for {pressure_label}"
 
+        rv_r_waves = pd.DataFrame()
         rv_derivative_analysis = None
         if is_rv_signal(pressure_col, source_record.get("filename", "")):
-            rv_derivative_analysis = rv_single_beat_derivative_analysis(aligned["time_s"].to_numpy(float), aligned[pressure_col].to_numpy(float))
+            if ecg_values is not None:
+                rv_r_waves = detect_r_waves(aligned["time_s"].to_numpy(float), np.asarray(ecg_values, dtype=float))
+            if not rv_r_waves.empty:
+                rv_derivative_analysis = rv_single_beat_derivative_analysis(
+                    aligned["time_s"].to_numpy(float),
+                    aligned[pressure_col].to_numpy(float),
+                    rv_r_waves["r_time_s"].to_numpy(float),
+                )
+                if rv_derivative_analysis is not None and rv_derivative_analysis[1].empty:
+                    rv_derivative_analysis = None
 
         plot_rows = 2 if ecg_values is not None else 1
         subplot_titles = [ecg_name, f"Pressure from {pressure_label}"] if plot_rows == 2 else [f"Pressure from {pressure_label}"]
@@ -3222,13 +3283,11 @@ with viewer_tab:
                     go.Scatter(
                         x=[event["time_s"]],
                         y=[event["value"]],
-                        mode="markers+text",
+                        mode="markers",
                         name=event["event"],
                         marker=dict(color=color, size=9, symbol="diamond"),
-                        text=[event["event"]],
-                        textposition="top center",
                         hovertemplate=(
-                            f"{event['event']}<br>Time: %{{x:.3f}} s<br>"
+                            f"Beat {int(event['beat_id'])}: {event['event']}<br>Time: %{{x:.3f}} s<br>"
                             "Value: %{y:.1f} mmHg/s<extra></extra>"
                         ),
                     ),
@@ -3255,13 +3314,11 @@ with viewer_tab:
                     go.Scatter(
                         x=[event["time_s"]],
                         y=[event["value"]],
-                        mode="markers+text",
+                        mode="markers",
                         name=event["event"],
                         marker=dict(color="rgb(245, 125, 40)", size=9, symbol="circle"),
-                        text=[event["event"].replace(" candidate", "")],
-                        textposition="bottom center",
                         hovertemplate=(
-                            f"{event['event']}<br>Time: %{{x:.3f}} s<br>"
+                            f"Beat {int(event['beat_id'])}: {event['event']}<br>Time: %{{x:.3f}} s<br>"
                             "Value: %{y:.1f} mmHg/s2<extra></extra>"
                         ),
                     ),
@@ -3272,16 +3329,21 @@ with viewer_tab:
 
         decorate_waveform_figure(fig, bottom_row=plot_rows)
         st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
-        if rv_derivative_analysis is not None:
+        if is_rv_signal(pressure_col, source_record.get("filename", "")) and rv_derivative_analysis is None:
+            st.warning(
+                "RV derivative landmarks need beat windows from detected R waves. No reliable RV-panel ECG R waves were detected, "
+                "so beat-level dP/dt and d2P/dt2 markers were not added."
+            )
+        elif rv_derivative_analysis is not None:
             _, rv_events = rv_derivative_analysis
             st.caption(
-                "RV single-beat derivative view based on Bellofiore et al. 2017: dP/dt max/min mark "
-                "first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
+                "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
+                "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
                 "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
             )
             with st.expander("RV derivative feature times", expanded=False):
                 st.dataframe(
-                    rv_events[["method", "event", "time_s", "value", "description"]],
+                    rv_events[["beat_id", "method", "event", "rr_start_s", "rr_end_s", "rr_duration_s", "time_s", "value", "description"]],
                     width="stretch",
                     hide_index=True,
                 )

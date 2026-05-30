@@ -6,7 +6,7 @@ This version adds synchronized dual cursors, patient/case metadata, automatic V-
 
 - Dual synchronized cursors visible across all waveform panels
 - Active selected frame shaded in all panels
-- RV waveform panels include dP/dt and d2P/dt2 derivative rows with candidate single-beat method feature markers
+- RV waveform panels include beat-by-beat dP/dt and d2P/dt2 derivative rows with candidate single-beat method feature markers
 - Label interval windows such as:
   - V wave 1
   - V wave 2
@@ -207,9 +207,9 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative display added in v0.8.3
+## RV derivative display updated in v0.8.4
 
-RV pressure panels include two additional rows for visual review of single-beat method landmarks:
+RV pressure panels include two additional rows for visual review of single-beat method landmarks. The app uses detected R waves from the RV panel ECG to analyze each QRS-to-QRS beat separately:
 
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 - Second derivative method: RV `d2P/dt2`, with candidate pulmonic valve opening and closing minima
