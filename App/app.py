@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.4"
+APP_VERSION = "v0.8.5"
 APP_VERSION_DATE = "2026-05-29"
 
 
@@ -1130,7 +1130,7 @@ def preferred_overlay_ecg_column(ecg_cols):
     return ecg_cols[0] if ecg_cols else None
 
 
-def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s: float = 0.35):
+def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s: float = 0.35, source_signal: str = ""):
     """
     Simple R-wave detector for an ECG signal.
     Uses whichever polarity has the larger absolute deflection.
@@ -1139,7 +1139,7 @@ def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s:
     try:
         from scipy.signal import find_peaks
     except Exception:
-        return pd.DataFrame(columns=["r_time_s", "r_value"])
+        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
 
     x = np.asarray(ecg_time, dtype=float)
     y = np.asarray(ecg_signal, dtype=float)
@@ -1147,7 +1147,7 @@ def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s:
     x = x[ok]
     y = y[ok]
     if len(y) < 10:
-        return pd.DataFrame(columns=["r_time_s", "r_value"])
+        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
 
     # Detrend using median and choose polarity.
     y0 = y - np.nanmedian(y)
@@ -1162,7 +1162,32 @@ def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s:
     height = np.nanpercentile(yp, 80)
 
     peaks, _ = find_peaks(yp, distance=distance, prominence=prominence, height=height)
-    return pd.DataFrame({"r_time_s": x[peaks], "r_value": y[peaks], "r_polarity": polarity})
+    return pd.DataFrame({"r_time_s": x[peaks], "r_value": y[peaks], "r_polarity": polarity, "r_wave_source_signal": source_signal})
+
+
+def detect_r_waves_from_ecg_source(time_s: np.ndarray, ecg_source: dict, min_required: int = 2):
+    if not ecg_source:
+        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"]), ""
+
+    candidates = []
+    primary_col = ecg_source.get("ecg_col", "")
+    values_by_col = ecg_source.get("values_by_col") or {}
+    if primary_col and primary_col in values_by_col:
+        candidates.append((primary_col, values_by_col[primary_col]))
+    for col, values in values_by_col.items():
+        if col != primary_col:
+            candidates.append((col, values))
+
+    best = pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
+    best_col = ""
+    for col, values in candidates:
+        detected = detect_r_waves(time_s, np.asarray(values, dtype=float), source_signal=col)
+        if len(detected) > len(best):
+            best = detected
+            best_col = col
+        if len(detected) >= min_required:
+            return detected, col
+    return best, best_col
 
 
 def pcwp_r_wave_source(analysis_signal_cols: list, same_file_ecg_by_pressure_col: dict):
@@ -2909,11 +2934,15 @@ with viewer_tab:
             source_ecg_cols = [c for c in source_ecg.columns if c.startswith("EKG_") and c.endswith("_mV")]
             source_ecg_col = preferred_overlay_ecg_column(source_ecg_cols)
             if source_ecg_col:
-                source_ecg_values = interpolate_to_grid(source_ecg, source_ecg_col, time_grid)
+                source_ecg_values_by_col = {
+                    c: interpolate_to_grid(source_ecg, c, time_grid)
+                    for c in source_ecg_cols
+                }
                 same_file_ecg_by_pressure_col[out_col] = {
                     "filename": r["filename"],
                     "ecg_col": source_ecg_col,
-                    "values": source_ecg_values,
+                    "values": source_ecg_values_by_col[source_ecg_col],
+                    "values_by_col": source_ecg_values_by_col,
                     "samples": len(source_ecg),
                 }
 
@@ -3085,9 +3114,9 @@ with viewer_tab:
     # ECG timing features must use the ECG embedded in the PCWP/PW pressure PW6 file.
     r_wave_pressure_col, r_wave_source = pcwp_r_wave_source(pcwp_signal_cols, same_file_ecg_by_pressure_col)
     if r_wave_source is not None:
-        r_waves = detect_r_waves(aligned["time_s"].to_numpy(), r_wave_source["values"])
+        r_waves, detected_pcwp_ecg_col = detect_r_waves_from_ecg_source(aligned["time_s"].to_numpy(), r_wave_source)
         r_wave_source_file = r_wave_source["filename"]
-        r_wave_source_signal = r_wave_source["ecg_col"]
+        r_wave_source_signal = detected_pcwp_ecg_col or r_wave_source["ecg_col"]
         if not r_waves.empty:
             r_waves.insert(0, "source_pressure_signal", r_wave_pressure_col)
             r_waves.insert(1, "source_file", r_wave_source_file)
@@ -3196,9 +3225,14 @@ with viewer_tab:
 
         rv_r_waves = pd.DataFrame()
         rv_derivative_analysis = None
+        rv_r_wave_source_signal = ""
+        rv_same_file_ecg_available = source_ecg is not None
         if is_rv_signal(pressure_col, source_record.get("filename", "")):
-            if ecg_values is not None:
-                rv_r_waves = detect_r_waves(aligned["time_s"].to_numpy(float), np.asarray(ecg_values, dtype=float))
+            if source_ecg is not None:
+                rv_r_waves, rv_r_wave_source_signal = detect_r_waves_from_ecg_source(
+                    aligned["time_s"].to_numpy(float),
+                    source_ecg,
+                )
             if not rv_r_waves.empty:
                 rv_derivative_analysis = rv_single_beat_derivative_analysis(
                     aligned["time_s"].to_numpy(float),
@@ -3330,15 +3364,22 @@ with viewer_tab:
         decorate_waveform_figure(fig, bottom_row=plot_rows)
         st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
         if is_rv_signal(pressure_col, source_record.get("filename", "")) and rv_derivative_analysis is None:
-            st.warning(
-                "RV derivative landmarks need beat windows from detected R waves. No reliable RV-panel ECG R waves were detected, "
-                "so beat-level dP/dt and d2P/dt2 markers were not added."
-            )
+            if rv_same_file_ecg_available:
+                st.warning(
+                    "RV derivative landmarks need QRS-to-QRS beat windows from the ECG embedded in the same RV PW6 file. "
+                    "No reliable R waves were detected in that RV same-file ECG, so beat-level dP/dt and d2P/dt2 markers were not added."
+                )
+            else:
+                st.warning(
+                    "RV derivative landmarks need the ECG embedded in the same RV PW6 file. A displayed fallback ECG may be visible, "
+                    "but it was not used for RV beat windows because it may come from a different strip."
+                )
         elif rv_derivative_analysis is not None:
             _, rv_events = rv_derivative_analysis
             st.caption(
                 "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
                 "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
+                f"Beat windows use the same-file RV ECG lead {rv_r_wave_source_signal or source_ecg.get('ecg_col', '')}. "
                 "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
             )
             with st.expander("RV derivative feature times", expanded=False):

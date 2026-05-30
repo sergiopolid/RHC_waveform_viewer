@@ -207,11 +207,13 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative display updated in v0.8.4
+## RV derivative display updated in v0.8.5
 
-RV pressure panels include two additional rows for visual review of single-beat method landmarks. The app uses detected R waves from the RV panel ECG to analyze each QRS-to-QRS beat separately:
+RV pressure panels include two additional rows for visual review of single-beat method landmarks. The app uses detected R waves from the ECG embedded in the same RV PW6 file to analyze each QRS-to-QRS beat separately:
 
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 - Second derivative method: RV `d2P/dt2`, with candidate pulmonic valve opening and closing minima
 
 This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It does not yet calculate final `Piso`, `Ees`, or coupling values.
+
+The RV beat-window detector tries each ECG lead embedded in the RV file and reports which lead was used. It does not use the global selected ECG or another pressure strip's ECG for RV beat windows.
