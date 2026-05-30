@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.14"
+APP_VERSION = "v0.8.15"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -1288,6 +1288,74 @@ def rv_pressure_beat_windows(t_ok: np.ndarray, p_smooth: np.ndarray, dt: float):
     return bounds
 
 
+def construct_rv_hmp_curve(
+    t_ok: np.ndarray,
+    p_smooth: np.ndarray,
+    dpdt: np.ndarray,
+    dpdt_max_idx: int,
+    dpdt_min_idx: int,
+    pressure_peak_mmHg: float,
+    beat_id: int,
+):
+    """
+    Kremer-style hydromotive pressure preview: cubic Hermite curve between
+    dP/dt max and dP/dt min, using measured endpoint pressures and derivatives.
+    """
+    t1 = float(t_ok[dpdt_max_idx])
+    t2 = float(t_ok[dpdt_min_idx])
+    if not np.isfinite(t1) or not np.isfinite(t2) or t2 <= t1:
+        return None
+
+    p1 = float(p_smooth[dpdt_max_idx])
+    p2 = float(p_smooth[dpdt_min_idx])
+    m1 = float(dpdt[dpdt_max_idx]) * 1.2
+    m2 = float(dpdt[dpdt_min_idx]) * 1.2
+    if not all(np.isfinite(v) for v in [p1, p2, m1, m2]):
+        return None
+
+    n_points = max(40, int(round((t2 - t1) / max(np.nanmedian(np.diff(t_ok)), 1e-3))))
+    t_curve = np.linspace(t1, t2, min(240, n_points))
+
+    try:
+        from scipy.interpolate import CubicSpline
+
+        spline = CubicSpline([t1, t2], [p1, p2], bc_type=((1, m1), (1, m2)))
+        hmp = np.asarray(spline(t_curve), dtype=float)
+    except Exception:
+        tau = (t_curve - t1) / (t2 - t1)
+        h00 = 2 * tau**3 - 3 * tau**2 + 1
+        h10 = tau**3 - 2 * tau**2 + tau
+        h01 = -2 * tau**3 + 3 * tau**2
+        h11 = tau**3 - tau**2
+        hmp = h00 * p1 + h10 * (t2 - t1) * m1 + h01 * p2 + h11 * (t2 - t1) * m2
+
+    if not np.isfinite(hmp).any():
+        return None
+
+    measured = np.interp(t_curve, t_ok, p_smooth)
+    uq = hmp - measured
+    pmax_idx = int(np.nanargmax(hmp))
+    pmax = float(hmp[pmax_idx])
+    if not np.isfinite(pmax) or pmax <= pressure_peak_mmHg:
+        return None
+
+    return pd.DataFrame(
+        {
+            "beat_id": beat_id,
+            "time_s": t_curve,
+            "hmp_mmHg": hmp,
+            "rv_pressure_smooth_mmHg": measured,
+            "uq_hmp_minus_pv_mmHg": uq,
+            "pmax_hmp_mmHg": pmax,
+            "pmax_time_s": float(t_curve[pmax_idx]),
+            "dpdt_max_time_s": t1,
+            "dpdt_min_time_s": t2,
+            "dpdt_max_slope_mmHg_per_s_corrected": m1,
+            "dpdt_min_slope_mmHg_per_s_corrected": m2,
+        }
+    )
+
+
 def rv_single_beat_derivative_analysis(
     time_s: np.ndarray,
     pressure: np.ndarray,
@@ -1295,8 +1363,7 @@ def rv_single_beat_derivative_analysis(
     """
     Beat-level visual feature detection for RV pressure and first-derivative landmarks.
     RV pressure peaks define each beat window. Within each pressure-beat window,
-    identify dP/dt extrema. Pmax/Piso reconstruction is intentionally not calculated
-    until the isovolumic sine model is reliable enough for review.
+    identify dP/dt extrema and build a Kremer-style HMP preview curve between them.
     """
     t = np.asarray(time_s, dtype=float)
     p = np.asarray(pressure, dtype=float)
@@ -1350,6 +1417,7 @@ def rv_single_beat_derivative_analysis(
         return derivative_df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     events = []
+    hmp_parts = []
     beat_id = 0
     for beat_start, beat_end, pressure_peak_idx, beat_indices in pressure_beat_windows:
         beat_duration_s = float(beat_end - beat_start)
@@ -1363,6 +1431,7 @@ def rv_single_beat_derivative_analysis(
 
         dpdt_max_idx = int(early_indices[np.nanargmax(dpdt[early_indices])])
         dpdt_min_idx = int(late_indices[np.nanargmin(dpdt[late_indices])])
+        pressure_peak = float(p_smooth[pressure_peak_idx])
 
         base_event = {
             "beat_id": beat_id,
@@ -1377,7 +1446,7 @@ def rv_single_beat_derivative_analysis(
                     "event": "RV pressure peak",
                     "method": "Peak detection",
                     "time_s": float(t_ok[pressure_peak_idx]),
-                    "value": float(p_smooth[pressure_peak_idx]),
+                    "value": pressure_peak,
                     "row": "rv_peak_fit",
                     "description": "Measured RV pressure peak within pressure-derived beat window",
                 },
@@ -1407,6 +1476,29 @@ def rv_single_beat_derivative_analysis(
         ivc_time_s = float(t_ok[closing_idx])
         pes_mmHg = float(p_smooth[closing_idx])
         pes_time_s = ivc_time_s
+        hmp_df = construct_rv_hmp_curve(
+            t_ok,
+            p_smooth,
+            dpdt,
+            dpdt_max_idx,
+            dpdt_min_idx,
+            pressure_peak,
+            beat_id,
+        )
+        if hmp_df is not None:
+            hmp_parts.append(hmp_df)
+            hmp_peak = hmp_df.iloc[int(hmp_df["hmp_mmHg"].to_numpy(float).argmax())]
+            events.append(
+                {
+                    **base_event,
+                    "event": "HMP Pmax preview",
+                    "method": "Hydromotive pressure cubic",
+                    "time_s": float(hmp_peak["time_s"]),
+                    "value": float(hmp_peak["hmp_mmHg"]),
+                    "row": "rv_peak_fit",
+                    "description": "Exploratory HMP peak from cubic curve between dP/dt max and dP/dt min",
+                }
+            )
 
         ic_threshold = 0.20 * float(dpdt[dpdt_max_idx])
         ic_candidates = beat_indices[(beat_indices <= dpdt_max_idx) & (dpdt[beat_indices] >= ic_threshold)]
@@ -1466,7 +1558,8 @@ def rv_single_beat_derivative_analysis(
             ]
         )
 
-    return derivative_df, pd.DataFrame(events), pd.DataFrame(), pd.DataFrame()
+    hmp_df = pd.concat(hmp_parts, ignore_index=True) if hmp_parts else pd.DataFrame()
+    return derivative_df, pd.DataFrame(events), hmp_df, pd.DataFrame()
 
 
 def pressure_ecg_lag_window(
@@ -2765,8 +2858,8 @@ with viewer_tab:
 
         with st.expander("RV single-beat analysis", expanded=False):
             st.caption(
-                "RV Pmax/Piso sine reconstruction and Ees/Ea calculations are disabled for now. "
-                "The RV tab shows pressure-derived beats and first-derivative landmarks only."
+                "RV sine reconstruction and Ees/Ea calculations are disabled. "
+                "The RV tab shows pressure-derived beats, first-derivative landmarks, and an exploratory Kremer-style HMP curve."
             )
 
         st.header("Database")
@@ -3366,7 +3459,7 @@ with viewer_tab:
                 plot_rows += 2
                 subplot_titles.extend(
                     [
-                        "RV beat peaks and first-derivative landmarks",
+                        "RV beat peaks, HMP preview, and first-derivative landmarks",
                         "First derivative method: dP/dt",
                     ]
                 )
@@ -3415,7 +3508,7 @@ with viewer_tab:
                 fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
 
             if rv_derivative_analysis is not None and peak_fit_row is not None and dpdt_row is not None:
-                rv_derivatives, rv_events, _, _ = rv_derivative_analysis
+                rv_derivatives, rv_events, rv_hmp, _ = rv_derivative_analysis
                 fig.add_trace(
                     go.Scatter(
                         x=rv_derivatives["time_s"],
@@ -3459,6 +3552,39 @@ with viewer_tab:
                         row=peak_fit_row,
                         col=1,
                     )
+                if not rv_hmp.empty:
+                    for beat_id, hmp_df in rv_hmp.groupby("beat_id", sort=True):
+                        fig.add_trace(
+                            go.Scatter(
+                                x=hmp_df["time_s"],
+                                y=hmp_df["hmp_mmHg"],
+                                mode="lines",
+                                name=f"Beat {int(beat_id)} HMP",
+                                line=dict(color="rgb(217, 70, 239)", width=2.7, dash="dash"),
+                                hovertemplate=(
+                                    f"Beat {int(beat_id)} HMP preview<br>Time: %{{x:.3f}} s<br>"
+                                    "HMP: %{y:.2f} mmHg<extra></extra>"
+                                ),
+                                showlegend=int(beat_id) == int(rv_hmp["beat_id"].min()),
+                            ),
+                            row=peak_fit_row,
+                            col=1,
+                        )
+                    hmp_peaks = peak_events[peak_events["event"] == "HMP Pmax preview"]
+                    if not hmp_peaks.empty:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=hmp_peaks["time_s"],
+                                y=hmp_peaks["value"],
+                                mode="markers",
+                                name="HMP Pmax preview",
+                                marker=dict(color="rgb(217, 70, 239)", size=11, symbol="star"),
+                                hovertemplate="Beat %{customdata}: HMP Pmax preview<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
+                                customdata=hmp_peaks["beat_id"],
+                            ),
+                            row=peak_fit_row,
+                            col=1,
+                        )
                 fit_limits = peak_events[peak_events["event"].isin(["IC onset 20% dP/dt max", "IR end 20% dP/dt min"])]
                 if not fit_limits.empty:
                     fig.add_trace(
@@ -3516,12 +3642,31 @@ with viewer_tab:
                     "RV pressure-derived beat windows could not be identified reliably, so the RV-only derivative panel was not added."
                 )
             elif rv_derivative_analysis is not None:
-                _, rv_events, _, _ = rv_derivative_analysis
+                _, rv_events, rv_hmp, _ = rv_derivative_analysis
                 st.caption(
-                    "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
+                    "RV single-beat derivative view: each beat is identified from the RV pressure waveform, not ECG R-R intervals. "
                     "dP/dt max/min mark first-derivative IC/IR references. "
-                    "Pmax/Piso sine reconstruction and Ees/Ea calculations are disabled until the reconstructed waveform is reliable enough for review."
+                    "The dashed HMP preview follows Kremer 2026's hydromotive-pressure concept using a cubic curve between dP/dt max and dP/dt min. "
+                    "Ees/Ea calculations remain disabled until PV-loop calibration is implemented."
                 )
+                if not rv_hmp.empty:
+                    hmp_summary = (
+                        rv_hmp[
+                            [
+                                "beat_id",
+                                "pmax_hmp_mmHg",
+                                "pmax_time_s",
+                                "dpdt_max_time_s",
+                                "dpdt_min_time_s",
+                                "dpdt_max_slope_mmHg_per_s_corrected",
+                                "dpdt_min_slope_mmHg_per_s_corrected",
+                            ]
+                        ]
+                        .drop_duplicates()
+                        .sort_values("beat_id")
+                    )
+                    with st.expander("RV HMP preview summary", expanded=False):
+                        st.dataframe(hmp_summary, width="stretch", hide_index=True)
                 with st.expander("RV derivative feature times", expanded=False):
                     event_cols = [
                         "beat_id",

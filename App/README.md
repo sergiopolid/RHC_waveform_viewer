@@ -208,16 +208,18 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative display updated in v0.8.14
+## RV derivative and HMP preview updated in v0.8.15
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:
 
-- RV beat peaks and first-derivative landmarks: smoothed RV pressure, measured RV peak, `Pes`, and 20% dP/dt IC/IR range markers
+- RV beat peaks, HMP preview, and first-derivative landmarks: smoothed RV pressure, measured RV peak, `Pes`, 20% dP/dt IC/IR range markers, and an exploratory HMP curve
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 
-This is currently a feature-identification/QC display based on Bellofiore et al. 2017. `IVO` is estimated at `dP/dt max`; `IVC` and `Pes` are estimated at `dP/dt min`.
+This is currently a feature-identification/QC display based on Bellofiore et al. 2017 and Kremer et al. 2026. `IVO` is estimated at `dP/dt max`; `IVC` and `Pes` are estimated at `dP/dt min`.
 
-`Pmax/Piso` sine reconstruction and derived `Ees`, `Ea`, and `Ees/Ea` calculations are disabled for now because the reconstructed isovolumic waveform is not yet reliable enough to support those values.
+The dashed HMP preview follows the Kremer-style hydromotive-pressure concept with a cubic/Hermite curve between `dP/dt max` and `dP/dt min`, using endpoint pressure derivatives corrected by a factor of 1.2. The HMP peak is shown as an exploratory `Pmax` preview when the reconstructed curve rises above the measured RV peak.
+
+Derived `Ees`, `Ea`, and `Ees/Ea` calculations remain disabled until PV-loop calibration, ensemble averaging, and volume/stroke-volume inputs are implemented and validated.
 
 ## Waveform workspace layout updated in v0.8.13
 
