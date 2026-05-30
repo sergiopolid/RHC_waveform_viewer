@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.17"
+APP_VERSION = "v0.8.18"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -259,6 +259,17 @@ def minmax_normalize(y: np.ndarray) -> np.ndarray:
         return out
     out[finite] = (y[finite] - ymin) / (ymax - ymin)
     return out
+
+
+def polygon_loop_area(x: np.ndarray, y: np.ndarray) -> float:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if len(x) < 3:
+        return np.nan
+    return float(abs(0.5 * (np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))))
 
 
 # -----------------------------
@@ -1610,6 +1621,10 @@ def construct_rv_hmp_curve(
     if not np.isfinite(pmax) or pmax <= pressure_peak_mmHg:
         return None
     pbef = 1.0 - (esp_mmHg / pmax) if np.isfinite(esp_mmHg) and pmax > 0 else np.nan
+    peak_flow_idx = int(np.nanargmax(uq_positive)) if np.isfinite(uq_positive).any() else None
+    peak_flow_proxy = float(uq_positive[peak_flow_idx]) if peak_flow_idx is not None else np.nan
+    peak_flow_time_s = float(t_curve[peak_flow_idx]) if peak_flow_idx is not None else np.nan
+    flow_volume_loop_area_proxy = polygon_loop_area(relative_volume, uq_positive)
 
     return pd.DataFrame(
         {
@@ -1633,6 +1648,9 @@ def construct_rv_hmp_curve(
             "max_elastance_proxy": elastance_max,
             "pbef_proxy": pbef,
             "stroke_volume_proxy_area": stroke_volume_proxy,
+            "peak_flow_proxy": peak_flow_proxy,
+            "peak_flow_time_s": peak_flow_time_s,
+            "flow_volume_loop_area_proxy": flow_volume_loop_area_proxy,
             "dpdt_max_time_s": t1,
             "dpdt_min_time_s": t2,
             "dpdt_max_slope_mmHg_per_s_corrected": m1,
@@ -2754,6 +2772,100 @@ def render_visual_data_dictionary():
         with c2:
             st.plotly_chart(ecg_timing_cartoon(), width="stretch", key="visual_dictionary_ecg_timing")
             st.caption("ECG timing metrics relate the PCWP morphology peak to same-file R waves, then optionally normalize by the RR cycle.")
+
+
+def rv_flow_volume_loop_figure(rv_hmp: pd.DataFrame, theme: dict):
+    fig = go.Figure()
+    loop_colors = [
+        theme["accent"],
+        theme["landmark"],
+        theme["purple"],
+        theme["success"],
+        theme["warning"],
+        theme["landmark_alt"],
+    ]
+    for i, (beat_id, beat_df) in enumerate(rv_hmp.groupby("beat_id", sort=True)):
+        loop_df = beat_df[["relative_volume_proxy", "uq_positive_proxy", "time_s"]].dropna()
+        if len(loop_df) < 3:
+            continue
+        color = loop_colors[i % len(loop_colors)]
+        fig.add_trace(
+            go.Scatter(
+                x=loop_df["relative_volume_proxy"],
+                y=loop_df["uq_positive_proxy"],
+                mode="lines",
+                name=f"Beat {int(beat_id)} loop",
+                line=dict(color=color, width=2.2),
+                customdata=loop_df["time_s"],
+                hovertemplate=(
+                    f"Beat {int(beat_id)}<br>Relative volume: %{{x:.3f}}<br>"
+                    "uQ+ proxy: %{y:.3f}<br>Time: %{customdata:.3f} s<extra></extra>"
+                ),
+            )
+        )
+
+        peak_flow_idx = int(np.nanargmax(beat_df["uq_positive_proxy"].to_numpy(float)))
+        peak_row = beat_df.iloc[peak_flow_idx]
+        fig.add_trace(
+            go.Scatter(
+                x=[peak_row["relative_volume_proxy"]],
+                y=[peak_row["uq_positive_proxy"]],
+                mode="markers",
+                name=f"Beat {int(beat_id)} peak uQ",
+                marker=dict(color=color, size=8, symbol="triangle-up"),
+                hovertemplate=(
+                    f"Beat {int(beat_id)} peak uQ<br>Relative volume: %{{x:.3f}}<br>"
+                    "uQ+ proxy: %{y:.3f}<extra></extra>"
+                ),
+                showlegend=False,
+            )
+        )
+
+        esp_time = float(beat_df["esp_proxy_time_s"].iloc[0])
+        if np.isfinite(esp_time):
+            esp_idx = int(np.nanargmin(np.abs(beat_df["time_s"].to_numpy(float) - esp_time)))
+            esp_row = beat_df.iloc[esp_idx]
+            if np.isfinite(esp_row["relative_volume_proxy"]) and np.isfinite(esp_row["uq_positive_proxy"]):
+                fig.add_trace(
+                    go.Scatter(
+                        x=[esp_row["relative_volume_proxy"]],
+                        y=[esp_row["uq_positive_proxy"]],
+                        mode="markers",
+                        name=f"Beat {int(beat_id)} ESP",
+                        marker=dict(color=color, size=9, symbol="circle-open"),
+                        hovertemplate=(
+                            f"Beat {int(beat_id)} ESP proxy<br>Relative volume: %{{x:.3f}}<br>"
+                            "uQ+ proxy: %{y:.3f}<extra></extra>"
+                        ),
+                        showlegend=False,
+                    )
+                )
+
+    fig.update_layout(
+        template=theme["plotly_template"],
+        paper_bgcolor=theme["background"],
+        plot_bgcolor=theme["card"],
+        font=dict(color=theme["text"]),
+        height=430,
+        margin=dict(t=50, b=60, l=65, r=30),
+        title=dict(text="Uncalibrated RV flow-volume proxy loop", x=0.02, xanchor="left"),
+        hovermode="closest",
+        legend=dict(orientation="h", yanchor="top", y=-0.18, xanchor="center", x=0.5),
+    )
+    fig.update_xaxes(
+        title_text="Relative volume proxy (unitless)",
+        autorange="reversed",
+        showgrid=True,
+        gridcolor=theme["grid_major"],
+        zeroline=False,
+    )
+    fig.update_yaxes(
+        title_text="uQ+ proxy = max(HMP - Pv, 0)",
+        showgrid=True,
+        gridcolor=theme["grid_major"],
+        zeroline=False,
+    )
+    return fig
 
 
 def get_recommended_feature_set():
@@ -4066,6 +4178,9 @@ with viewer_tab:
                                 "esp_proxy_time_s",
                                 "pbef_proxy",
                                 "stroke_volume_proxy_area",
+                                "peak_flow_proxy",
+                                "peak_flow_time_s",
+                                "flow_volume_loop_area_proxy",
                                 "max_elastance_proxy",
                                 "dpdt_max_time_s",
                                 "dpdt_min_time_s",
@@ -4078,6 +4193,16 @@ with viewer_tab:
                     )
                     with st.expander("RV HMP / volume proxy summary", expanded=False):
                         st.dataframe(hmp_summary, width="stretch", hide_index=True)
+                    with st.expander("RV flow-volume proxy loop", expanded=False):
+                        st.plotly_chart(
+                            rv_flow_volume_loop_figure(rv_hmp, chart_theme),
+                            width="stretch",
+                            key=f"rv_flow_volume_loop_{case_key}_{pressure_col}",
+                        )
+                        st.caption(
+                            "Loop uses relative volume proxy on the x-axis and uncalibrated uQ+ = max(HMP - RV pressure, 0) on the y-axis. "
+                            "It is useful for beat-shape review, but it is not calibrated volume or true flow."
+                        )
                 with st.expander("RV derivative feature times", expanded=False):
                     event_cols = [
                         "beat_id",

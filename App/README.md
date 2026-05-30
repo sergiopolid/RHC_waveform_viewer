@@ -227,6 +227,18 @@ The RV tab now adds an exploratory Kremer-style derived proxy row below the HMP/
 
 These values are displayed for QC/research exploration only. True volume calibration, stroke volume calibration, `Ees`, `Ea`, and `Ees/Ea` remain disabled until validated external volume/SV inputs are added.
 
+## RV flow-volume proxy loop added in v0.8.18
+
+The RV tab now includes an expandable uncalibrated flow-volume proxy loop. Each accepted RV beat is plotted with:
+
+- x-axis: relative volume proxy
+- y-axis: positive flow proxy, `uQ+ = max(HMP - Pv, 0)`
+- peak uQ marker
+- ESP proxy marker
+- loop-area proxy in the HMP/volume summary table
+
+The x-axis is reversed to resemble conventional pressure/volume-style loop review. This remains an uncalibrated shape/QC visualization, not true mL volume or true mL/s flow.
+
 ## RV derivative and HMP preview updated in v0.8.15
 
 Mapped RV pressure panels include additional rows for visual review of single-beat method landmarks. The RV-only rows are shown only for channels mapped as `RV`, so RA/PA panels do not inherit the RV analysis from filename numbering. Beats are identified from the RV pressure waveform itself, not from ECG R-R intervals:
