@@ -19,7 +19,7 @@ import streamlit.components.v1 as components
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.22"
+APP_VERSION = "v0.8.23"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -1353,8 +1353,9 @@ def reference_sort_key(reference: dict, pressure_col: str = "", source_filename:
     return (score, name)
 
 
-def render_reference_file(reference: dict):
+def render_reference_file(reference: dict, key_suffix: str = ""):
     caption = f"Reference waveform output: {reference['name']}"
+    key_base = re.sub(r"[^A-Za-z0-9_]+", "_", f"{key_suffix}_{reference['name']}").strip("_")
     if reference["ext"] == ".pdf":
         pdf_b64 = base64.b64encode(reference["data"]).decode("ascii")
         safe_caption = html.escape(caption)
@@ -1377,7 +1378,7 @@ def render_reference_file(reference: dict):
             file_name=reference["name"],
             mime="application/pdf",
             width="stretch",
-            key=f"download_reference_pdf_{reference['name']}",
+            key=f"download_reference_pdf_{key_base}",
         )
         st.caption(caption)
     else:
@@ -4562,7 +4563,7 @@ with viewer_tab:
                         help="Shows an uploaded Xper PDF/JPEG/PNG under the PCWP waveform for visual comparison.",
                     )
                     selected_reference = next(ref for ref in matched_references if ref["name"] == selected_reference_name)
-                    render_reference_file(selected_reference)
+                    render_reference_file(selected_reference, key_suffix=f"{case_key}_{pressure_col}")
 
     standalone_ecg_cols = [c for c in display_signal_cols if "EKG" in c]
     if not rendered_pressure_cols and standalone_ecg_cols:
