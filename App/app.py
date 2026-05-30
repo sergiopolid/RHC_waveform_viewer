@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.19"
+APP_VERSION = "v0.8.20"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -4182,18 +4182,20 @@ with viewer_tab:
                     )
                 if not rv_hmp.empty:
                     for beat_id, hmp_df in rv_hmp.groupby("beat_id", sort=True):
+                        show_first = int(beat_id) == int(rv_hmp["beat_id"].min())
                         fig.add_trace(
                             go.Scatter(
                                 x=hmp_df["time_s"],
                                 y=hmp_df["hmp_mmHg"],
                                 mode="lines",
-                                name=f"Beat {int(beat_id)} HMP",
+                                name="HMP preview",
                                 line=dict(color=chart_theme["purple"], width=2.7, dash="dash"),
                                 hovertemplate=(
                                     f"Beat {int(beat_id)} HMP preview<br>Time: %{{x:.3f}} s<br>"
                                     "HMP: %{y:.2f} mmHg<extra></extra>"
                                 ),
-                                showlegend=int(beat_id) == int(rv_hmp["beat_id"].min()),
+                                legendgroup="rv_hmp",
+                                showlegend=show_first,
                             ),
                             row=peak_fit_row,
                             col=1,
@@ -4312,17 +4314,23 @@ with viewer_tab:
                     col=1,
                 )
                 first_events = rv_events[rv_events["row"] == "dpdt"]
-                for _, event in first_events.iterrows():
-                    color = chart_theme["landmark"] if event["event"] == "dP/dt max" else chart_theme["landmark_alt"]
+                for event_name, color in [
+                    ("dP/dt max", chart_theme["landmark"]),
+                    ("dP/dt min", chart_theme["landmark_alt"]),
+                ]:
+                    events = first_events[first_events["event"] == event_name]
+                    if events.empty:
+                        continue
                     fig.add_trace(
                         go.Scatter(
-                            x=[event["time_s"]],
-                            y=[event["value"]],
+                            x=events["time_s"],
+                            y=events["value"],
                             mode="markers",
-                            name=event["event"],
+                            name=event_name,
                             marker=dict(color=color, size=9, symbol="diamond"),
+                            customdata=events["beat_id"],
                             hovertemplate=(
-                                f"Beat {int(event['beat_id'])}: {event['event']}<br>Time: %{{x:.3f}} s<br>"
+                                f"Beat %{{customdata}}: {event_name}<br>Time: %{{x:.3f}} s<br>"
                                 "Value: %{y:.1f} mmHg/s<extra></extra>"
                             ),
                         ),
