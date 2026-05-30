@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.7"
+APP_VERSION = "v0.8.8"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -1223,7 +1223,7 @@ def zscore_signal(y: np.ndarray):
     return (filled - center) / spread
 
 
-def fit_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: float, t_end: float, min_piso: float | None = None):
+def interpolate_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: float, t_end: float, min_piso: float | None = None):
     t_fit = np.asarray(t_fit, dtype=float)
     p_fit = np.asarray(p_fit, dtype=float)
     ok = np.isfinite(t_fit) & np.isfinite(p_fit)
@@ -1322,7 +1322,7 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
     """
     Beat-level visual feature detection for the Bellofiore RV single-beat methods.
     Consecutive R waves define each beat window. Within each QRS-to-QRS window,
-    identify dP/dt extrema, estimate a first-derivative Piso sine fit, and find
+    identify dP/dt extrema, estimate a first-derivative Piso sine interpolation, and find
     candidate second-derivative minima. This does not yet calculate final Ees.
     """
     t = np.asarray(time_s, dtype=float)
@@ -1378,10 +1378,11 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
     r_times = np.sort(r_times[np.isfinite(r_times)])
     r_times = r_times[(r_times >= t_ok[0]) & (r_times <= t_ok[-1])]
     if len(r_times) < 2:
-        return derivative_df, pd.DataFrame(), pd.DataFrame()
+        return derivative_df, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     events = []
     fit_parts = []
+    sample_parts = []
     beat_id = 0
     for beat_start, beat_end in zip(r_times[:-1], r_times[1:]):
         rr_s = float(beat_end - beat_start)
@@ -1490,7 +1491,7 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
         fit_indices = np.flatnonzero(fit_mask)
         measured_peak = float(p_smooth[pressure_peak_idx])
         min_piso = measured_peak + max(1.0, 0.02 * abs(measured_peak))
-        fit_result = fit_rv_piso_sine(
+        fit_result = interpolate_rv_piso_sine(
             t_ok[fit_indices],
             p_smooth[fit_indices],
             float(t_ok[ic_onset_idx]),
@@ -1498,6 +1499,19 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
             min_piso=min_piso,
         )
         if fit_result is not None:
+            ic_fit_indices = np.flatnonzero((t_ok >= t_ok[ic_onset_idx]) & (t_ok <= t_ok[dpdt_max_idx]))
+            ir_fit_indices = np.flatnonzero((t_ok >= t_ok[dpdt_min_idx]) & (t_ok <= t_ok[ir_end_idx]))
+            sample_parts.append(
+                pd.DataFrame(
+                    {
+                        "beat_id": beat_id,
+                        "time_s": np.concatenate([t_ok[ic_fit_indices], t_ok[ir_fit_indices]]),
+                        "pressure_mmHg": np.concatenate([p_smooth[ic_fit_indices], p_smooth[ir_fit_indices]]),
+                        "range": ["IC interpolation samples"] * len(ic_fit_indices)
+                        + ["IR interpolation samples"] * len(ir_fit_indices),
+                    }
+                )
+            )
             fit_df = pd.DataFrame(
                 {
                     "beat_id": beat_id,
@@ -1517,30 +1531,30 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
                     {
                         **base_event,
                         "event": "IC onset 20% dP/dt max",
-                        "method": "First derivative sine fit",
+                        "method": "First derivative sine interpolation",
                         "time_s": float(t_ok[ic_onset_idx]),
                         "value": float(p_smooth[ic_onset_idx]),
                         "row": "rv_peak_fit",
-                        "description": "Start of IC fitting range",
+                        "description": "Start of IC interpolation range",
                     },
                     {
                         **base_event,
                         "event": "IR end 20% dP/dt min",
-                        "method": "First derivative sine fit",
+                        "method": "First derivative sine interpolation",
                         "time_s": float(t_ok[ir_end_idx]),
                         "value": float(p_smooth[ir_end_idx]),
                         "row": "rv_peak_fit",
-                        "description": "End of IR fitting range",
+                        "description": "End of IR interpolation range",
                     },
                     {
                         **base_event,
                         "event": "Piso estimate",
-                        "method": "First derivative sine fit",
+                        "method": "First derivative sine interpolation",
                         "time_s": float(fit_result["piso_time_s"]),
                         "value": float(fit_result["piso_mmHg"]),
                         "row": "rv_peak_fit",
                         "description": (
-                            f"Sine-fit peak pressure; {fit_result['piso_mmHg'] - measured_peak:.2f} mmHg "
+                            f"Sine interpolation peak pressure; {fit_result['piso_mmHg'] - measured_peak:.2f} mmHg "
                             f"above measured RV peak; RMSE {fit_result['fit_rmse_mmHg']:.2f} mmHg"
                         ),
                     },
@@ -1561,7 +1575,8 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
             )
 
     fits_df = pd.concat(fit_parts, ignore_index=True) if fit_parts else pd.DataFrame()
-    return derivative_df, pd.DataFrame(events), fits_df
+    samples_df = pd.concat(sample_parts, ignore_index=True) if sample_parts else pd.DataFrame()
+    return derivative_df, pd.DataFrame(events), fits_df, samples_df
 
 
 def pressure_ecg_lag_window(
@@ -3433,7 +3448,7 @@ with viewer_tab:
             plot_rows += 3
             subplot_titles.extend(
                 [
-                    "RV beat peaks and first-derivative sine fit",
+                    "RV beat peaks and first-derivative sine interpolation",
                     "First derivative method: dP/dt",
                     "Second derivative method: d2P/dt2",
                 ]
@@ -3483,7 +3498,7 @@ with viewer_tab:
             fig.update_yaxes(title_text="mmHg", row=pressure_row, col=1)
 
         if rv_derivative_analysis is not None and peak_fit_row is not None and dpdt_row is not None and d2pdt2_row is not None:
-            rv_derivatives, rv_events, rv_fits = rv_derivative_analysis
+            rv_derivatives, rv_events, rv_fits, rv_fit_samples = rv_derivative_analysis
             fig.add_trace(
                 go.Scatter(
                     x=rv_derivatives["time_s"],
@@ -3519,7 +3534,7 @@ with viewer_tab:
                         x=fit_limits["time_s"],
                         y=fit_limits["value"],
                         mode="markers",
-                        name="Sine fit limits",
+                        name="Sine interpolation limits",
                         marker=dict(color="rgb(37, 99, 235)", size=7, symbol="x"),
                         hovertemplate="%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>Pressure: %{y:.2f} mmHg<extra></extra>",
                         text=fit_limits["event"],
@@ -3528,6 +3543,29 @@ with viewer_tab:
                     row=peak_fit_row,
                     col=1,
                 )
+            if not rv_fit_samples.empty:
+                for sample_range, sample_df in rv_fit_samples.groupby("range", sort=False):
+                    fig.add_trace(
+                        go.Scatter(
+                            x=sample_df["time_s"],
+                            y=sample_df["pressure_mmHg"],
+                            mode="markers",
+                            name=sample_range,
+                            marker=dict(
+                                color="rgba(37, 99, 235, 0.78)" if sample_range.startswith("IC") else "rgba(16, 185, 129, 0.78)",
+                                size=4,
+                                symbol="circle",
+                            ),
+                            hovertemplate=(
+                                "%{text}<br>Beat %{customdata}<br>Time: %{x:.3f} s<br>"
+                                "Pressure: %{y:.2f} mmHg<extra></extra>"
+                            ),
+                            text=sample_df["range"],
+                            customdata=sample_df["beat_id"],
+                        ),
+                        row=peak_fit_row,
+                        col=1,
+                    )
             if not rv_fits.empty:
                 for beat_id, fit_df in rv_fits.groupby("beat_id", sort=True):
                     fig.add_trace(
@@ -3535,11 +3573,11 @@ with viewer_tab:
                             x=fit_df["time_s"],
                             y=fit_df["piso_fit_mmHg"],
                             mode="lines",
-                            name=f"Beat {int(beat_id)} Piso sine fit",
+                            name=f"Beat {int(beat_id)} Piso sine interpolation",
                             line=dict(color="rgb(217, 70, 239)", width=2.6, dash="dash"),
                             hovertemplate=(
-                                f"Beat {int(beat_id)} sine fit<br>Time: %{{x:.3f}} s<br>"
-                                "Fit pressure: %{y:.2f} mmHg<extra></extra>"
+                                f"Beat {int(beat_id)} sine interpolation<br>Time: %{{x:.3f}} s<br>"
+                                "Interpolated pressure: %{y:.2f} mmHg<extra></extra>"
                             ),
                             showlegend=int(beat_id) == int(rv_fits["beat_id"].min()),
                         ),
@@ -3640,11 +3678,11 @@ with viewer_tab:
                     "but it was not used for RV beat windows because it may come from a different strip."
                 )
         elif rv_derivative_analysis is not None:
-            _, rv_events, rv_fits = rv_derivative_analysis
+            _, rv_events, rv_fits, _ = rv_derivative_analysis
             st.caption(
                 "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
                 "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
-                "The RV peak/Piso row marks measured RV peaks, 20% dP/dt fitting limits, and the first-derivative sine fit used to estimate Piso. "
+                "The RV peak/Piso row marks measured RV peaks, the IC/IR samples used for sine interpolation, 20% dP/dt interpolation limits, and the first-derivative sine interpolation used to estimate Piso. "
                 f"Beat windows use the same-file RV ECG lead {rv_r_wave_source_signal or source_ecg.get('ecg_col', '')}. "
                 "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
             )
@@ -3654,7 +3692,7 @@ with viewer_tab:
                     .drop_duplicates()
                     .sort_values("beat_id")
                 )
-                with st.expander("RV Piso sine-fit summary", expanded=False):
+                with st.expander("RV Piso sine interpolation summary", expanded=False):
                     st.dataframe(fit_summary, width="stretch", hide_index=True)
             with st.expander("RV derivative feature times", expanded=False):
                 st.dataframe(

@@ -207,16 +207,16 @@ Labeled intervals now export pressure-channel statistics plus a wide-form raw wa
 
 When labeled intervals are saved to the SQLite database, the raw waveform samples are saved too. The Database tab can preview saved segments and restore a prior interval set into the Waveform viewer, where the shaded selections reappear and can be edited before saving/exporting again.
 
-## RV derivative and Piso display updated in v0.8.7
+## RV derivative and Piso display updated in v0.8.8
 
 RV pressure panels include additional rows for visual review of single-beat method landmarks. The app uses detected R waves from the ECG embedded in the same RV PW6 file to analyze each QRS-to-QRS beat separately:
 
-- RV beat peaks and first-derivative sine fit: smoothed RV pressure, measured RV peak, 20% dP/dt fitting limits, fitted sine curve, and `Piso` marker
+- RV beat peaks and first-derivative sine interpolation: smoothed RV pressure, measured RV peak, IC/IR samples used for interpolation, 20% dP/dt interpolation limits, interpolated sine curve, and `Piso` marker
 - First derivative method: RV `dP/dt`, with maximum and minimum markers for isovolumic contraction/relaxation references
 - Second derivative method: RV `d2P/dt2`, with candidate pulmonic valve opening and closing minima
 
 This is currently a feature-identification/QC display based on Bellofiore et al. 2017. It estimates visual `Piso` candidates but does not yet calculate final validated `Ees` or coupling values.
 
-`Piso` candidates are constrained to sit above the measured RV pressure peak for that beat. If the sine fit cannot satisfy that physiologic requirement, the app skips that candidate rather than displaying a misleading low fitted peak.
+`Piso` candidates are constrained to sit above the measured RV pressure peak for that beat. If the sine interpolation cannot satisfy that physiologic requirement, the app skips that candidate rather than displaying a misleading low fitted peak.
 
 The RV beat-window detector tries each ECG lead embedded in the RV file and reports which lead was used. It does not use the global selected ECG or another pressure strip's ECG for RV beat windows.
