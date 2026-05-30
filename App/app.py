@@ -19,7 +19,7 @@ import streamlit.components.v1 as components
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.21"
+APP_VERSION = "v0.8.22"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -1524,16 +1524,40 @@ def preferred_overlay_ecg_column(ecg_cols):
     return ecg_cols[0] if ecg_cols else None
 
 
+def empty_r_waves_df():
+    return pd.DataFrame(
+        columns=[
+            "r_time_s",
+            "r_value",
+            "r_polarity",
+            "r_wave_source_signal",
+            "r_detection_score",
+        ]
+    )
+
+
+def merge_peak_indices_by_distance(indices: list[int], values: np.ndarray, min_distance: int):
+    if not indices:
+        return []
+    kept = []
+    for idx in sorted(set(int(i) for i in indices)):
+        if not kept or idx - kept[-1] >= min_distance:
+            kept.append(idx)
+        elif values[idx] > values[kept[-1]]:
+            kept[-1] = idx
+    return kept
+
+
 def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s: float = 0.35, source_signal: str = ""):
     """
-    Simple R-wave detector for an ECG signal.
-    Uses whichever polarity has the larger absolute deflection.
-    Returns a DataFrame with r_time_s and r_value.
+    R-wave detector for an ECG signal.
+    QRS candidates are detected adaptively, then snapped to the local maximum
+    mV point so the plotted timing line lands on the visible R-wave apex.
     """
     try:
         from scipy.signal import find_peaks
     except Exception:
-        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
+        return empty_r_waves_df()
 
     x = np.asarray(ecg_time, dtype=float)
     y = np.asarray(ecg_signal, dtype=float)
@@ -1541,27 +1565,92 @@ def detect_r_waves(ecg_time: np.ndarray, ecg_signal: np.ndarray, min_distance_s:
     x = x[ok]
     y = y[ok]
     if len(y) < 10:
-        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
+        return empty_r_waves_df()
 
-    # Detrend using median and choose polarity.
-    y0 = y - np.nanmedian(y)
-    polarity = 1 if np.nanmax(y0) >= abs(np.nanmin(y0)) else -1
-    yp = y0 * polarity
-
-    fs_est = 1.0 / np.nanmedian(np.diff(x)) if len(x) > 2 and np.nanmedian(np.diff(x)) > 0 else 500
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+    dt = np.diff(x)
+    dt = dt[np.isfinite(dt) & (dt > 0)]
+    fs_est = 1.0 / np.nanmedian(dt) if len(dt) else 500.0
+    fs_est = float(np.clip(fs_est, 50.0, 2000.0))
     distance = max(1, int(min_distance_s * fs_est))
+    snap_radius = max(1, int(0.08 * fs_est))
 
-    # Adaptive threshold: favor clear QRS-like peaks, but remain permissive.
-    prominence = max(np.nanstd(yp) * 1.0, (np.nanpercentile(yp, 95) - np.nanpercentile(yp, 50)) * 0.5)
-    height = np.nanpercentile(yp, 80)
+    # Detrend using the median. Positive mV peaks are preferred because the
+    # visual marker should sit on the R-wave apex, not on the negative S wave.
+    y0 = y - np.nanmedian(y)
+    if not np.isfinite(y0).any() or np.nanmax(y0) == np.nanmin(y0):
+        return empty_r_waves_df()
 
-    peaks, _ = find_peaks(yp, distance=distance, prominence=prominence, height=height)
-    return pd.DataFrame({"r_time_s": x[peaks], "r_value": y[peaks], "r_polarity": polarity, "r_wave_source_signal": source_signal})
+    qrs_candidates = []
+    positive_prominence = max(
+        np.nanstd(y0) * 0.75,
+        (np.nanpercentile(y0, 97) - np.nanpercentile(y0, 50)) * 0.35,
+    )
+    positive_height = np.nanpercentile(y0, 82)
+    positive_peaks, _ = find_peaks(
+        y0,
+        distance=distance,
+        prominence=positive_prominence,
+        height=positive_height,
+    )
+    qrs_candidates.extend(int(i) for i in positive_peaks)
+
+    # Fallback for low-amplitude or partly inverted traces: find QRS complexes
+    # by absolute deflection, then still snap to the local positive mV maximum.
+    if len(qrs_candidates) < 2:
+        abs_y0 = np.abs(y0)
+        abs_prominence = max(
+            np.nanstd(abs_y0) * 0.75,
+            (np.nanpercentile(abs_y0, 97) - np.nanpercentile(abs_y0, 50)) * 0.35,
+        )
+        abs_height = np.nanpercentile(abs_y0, 82)
+        abs_peaks, _ = find_peaks(
+            abs_y0,
+            distance=distance,
+            prominence=abs_prominence,
+            height=abs_height,
+        )
+        qrs_candidates.extend(int(i) for i in abs_peaks)
+
+    snapped = []
+    for idx in qrs_candidates:
+        lo = max(0, int(idx) - snap_radius)
+        hi = min(len(y), int(idx) + snap_radius + 1)
+        if hi <= lo:
+            continue
+        snapped.append(lo + int(np.nanargmax(y[lo:hi])))
+
+    peak_indices = merge_peak_indices_by_distance(snapped, y, distance)
+    if not peak_indices:
+        return empty_r_waves_df()
+
+    r_times = x[peak_indices]
+    r_values = y[peak_indices]
+    rr = np.diff(r_times)
+    if len(rr):
+        rr_median = float(np.nanmedian(rr))
+        rr_cv = float(np.nanstd(rr) / rr_median) if rr_median > 0 else 1.0
+    else:
+        rr_cv = 1.0
+    amplitude_score = float(np.nanmedian(r_values - np.nanmedian(y))) if len(r_values) else 0.0
+    detection_score = float(len(peak_indices) * 10.0 + amplitude_score - min(rr_cv, 2.0) * 2.0)
+
+    return pd.DataFrame(
+        {
+            "r_time_s": r_times,
+            "r_value": r_values,
+            "r_polarity": 1,
+            "r_wave_source_signal": source_signal,
+            "r_detection_score": detection_score,
+        }
+    )
 
 
 def detect_r_waves_from_ecg_source(time_s: np.ndarray, ecg_source: dict, min_required: int = 2):
     if not ecg_source:
-        return pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"]), ""
+        return empty_r_waves_df(), ""
 
     candidates = []
     primary_col = ecg_source.get("ecg_col", "")
@@ -1572,15 +1661,18 @@ def detect_r_waves_from_ecg_source(time_s: np.ndarray, ecg_source: dict, min_req
         if col != primary_col:
             candidates.append((col, values))
 
-    best = pd.DataFrame(columns=["r_time_s", "r_value", "r_polarity", "r_wave_source_signal"])
+    best = empty_r_waves_df()
     best_col = ""
     for col, values in candidates:
         detected = detect_r_waves(time_s, np.asarray(values, dtype=float), source_signal=col)
-        if len(detected) > len(best):
+        detected_score = float(detected["r_detection_score"].iloc[0]) if not detected.empty and "r_detection_score" in detected.columns else -np.inf
+        best_score = float(best["r_detection_score"].iloc[0]) if not best.empty and "r_detection_score" in best.columns else -np.inf
+        if len(detected) >= min_required and detected_score > best_score:
             best = detected
             best_col = col
-        if len(detected) >= min_required:
-            return detected, col
+        elif best.empty and len(detected) > len(best):
+            best = detected
+            best_col = col
     return best, best_col
 
 
@@ -3978,9 +4070,9 @@ with viewer_tab:
         spikethickness=1,
     )
 
-    def decorate_waveform_figure(fig, bottom_row: int):
-        if not r_waves.empty:
-            for rt in r_waves["r_time_s"].to_list():
+    def decorate_waveform_figure(fig, bottom_row: int, r_wave_df: pd.DataFrame | None = None):
+        if r_wave_df is not None and not r_wave_df.empty:
+            for rt in r_wave_df["r_time_s"].to_list():
                 fig.add_vline(x=rt, line_width=1, line_dash="dot", line_color=chart_theme["r_wave"])
 
         fig.add_vrect(x0=lo, x1=hi, fillcolor=chart_theme["selection_fill"], line_width=0)
@@ -4036,6 +4128,18 @@ with viewer_tab:
         )
 
     rendered_pressure_cols = sorted([c for c in display_signal_cols if c in displayed_pressure_cols], key=pressure_sort_key)
+    displayed_r_waves_by_pressure_col = {}
+    for pressure_col in rendered_pressure_cols:
+        source_ecg = same_file_ecg_by_pressure_col.get(pressure_col)
+        if source_ecg is not None:
+            panel_r_waves, _ = detect_r_waves_from_ecg_source(aligned["time_s"].to_numpy(), source_ecg)
+            displayed_r_waves_by_pressure_col[pressure_col] = panel_r_waves
+        elif chosen_ecg is not None and ecg_col in aligned.columns:
+            displayed_r_waves_by_pressure_col[pressure_col] = detect_r_waves(
+                aligned["time_s"].to_numpy(),
+                aligned[ecg_col].to_numpy(float),
+                source_signal=ecg_col,
+            )
 
     def waveform_tab_label(col: str) -> str:
         source = pressure_source_by_col.get(col, {})
@@ -4083,6 +4187,7 @@ with viewer_tab:
             if ecg_values is None and chosen_ecg is not None and ecg_col in aligned.columns:
                 ecg_values = aligned[ecg_col]
                 ecg_name = f"EKG reference for {pressure_label}"
+            plot_r_waves = displayed_r_waves_by_pressure_col.get(pressure_col, empty_r_waves_df())
 
             rv_derivative_analysis = None
             is_rv_pressure = is_mapped_rv_pressure(pressure_col, source_record)
@@ -4362,7 +4467,7 @@ with viewer_tab:
                     )
                 fig.update_yaxes(title_text="mmHg/s", row=dpdt_row, col=1)
 
-            decorate_waveform_figure(fig, bottom_row=plot_rows)
+            decorate_waveform_figure(fig, bottom_row=plot_rows, r_wave_df=plot_r_waves)
             st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{pressure_col}")
             if is_rv_pressure and rv_derivative_analysis is None:
                 st.warning(
@@ -4476,7 +4581,12 @@ with viewer_tab:
                 col=1,
             )
             fig.update_yaxes(title_text="mV", row=1, col=1)
-            decorate_waveform_figure(fig, bottom_row=1)
+            ecg_plot_r_waves = detect_r_waves(
+                aligned["time_s"].to_numpy(),
+                aligned[ecg_display_col].to_numpy(float),
+                source_signal=ecg_display_col,
+            )
+            decorate_waveform_figure(fig, bottom_row=1, r_wave_df=ecg_plot_r_waves)
             st.plotly_chart(fig, width="stretch", key=f"plot_{case_key}_{ecg_display_col}")
 
     with st.expander("Detected ECG R waves / timing reference"):
@@ -4485,6 +4595,32 @@ with viewer_tab:
         else:
             st.caption(f"R waves used for timing come from {r_wave_source_file} / {r_wave_source_signal}, matched to {r_wave_pressure_col}.")
             st.dataframe(r_waves, width="stretch")
+        if displayed_r_waves_by_pressure_col:
+            display_rows = []
+            for pressure_col, detected in displayed_r_waves_by_pressure_col.items():
+                if detected.empty:
+                    display_rows.append(
+                        {
+                            "pressure_signal": pressure_col,
+                            "display_ecg_signal": "",
+                            "detected_r_waves": 0,
+                            "median_rr_ms": np.nan,
+                            "median_r_mV": np.nan,
+                        }
+                    )
+                    continue
+                rr = np.diff(detected["r_time_s"].to_numpy(float))
+                display_rows.append(
+                    {
+                        "pressure_signal": pressure_col,
+                        "display_ecg_signal": str(detected["r_wave_source_signal"].iloc[0]),
+                        "detected_r_waves": int(len(detected)),
+                        "median_rr_ms": float(np.nanmedian(rr) * 1000.0) if len(rr) else np.nan,
+                        "median_r_mV": float(np.nanmedian(detected["r_value"].to_numpy(float))),
+                    }
+                )
+            st.caption("R waves used for vertical display lines are detected from the ECG trace shown in each waveform tab.")
+            st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
 
     st.subheader("Current selected-frame statistics")
     st.caption(f"Active selection: {lo:.3f}–{hi:.3f} s")
