@@ -18,7 +18,7 @@ import streamlit as st
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.8"
+APP_VERSION = "v0.8.9"
 APP_VERSION_DATE = "2026-05-30"
 
 
@@ -1223,7 +1223,7 @@ def zscore_signal(y: np.ndarray):
     return (filled - center) / spread
 
 
-def interpolate_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: float, t_end: float, min_piso: float | None = None):
+def interpolate_rv_pmax_half_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: float, t_end: float, min_pmax: float | None = None):
     t_fit = np.asarray(t_fit, dtype=float)
     p_fit = np.asarray(p_fit, dtype=float)
     ok = np.isfinite(t_fit) & np.isfinite(p_fit)
@@ -1237,41 +1237,43 @@ def interpolate_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: floa
     except Exception:
         return None
 
-    x_fit = t_fit - t_start
     fit_duration = max(float(t_end - t_start), 1e-3)
-    amp0 = max((float(np.nanmax(p_fit)) - float(np.nanmin(p_fit))) / 2.0, 1.0)
-    offset0 = float(np.nanmean(p_fit))
-    omega0 = 2.0 * np.pi / fit_duration
-    min_piso = float(min_piso) if min_piso is not None and np.isfinite(min_piso) else None
+    min_pmax = float(min_pmax) if min_pmax is not None and np.isfinite(min_pmax) else None
 
-    def sine_model(x, amp, omega, phase, offset):
-        return offset + amp * np.sin(omega * x + phase)
+    def half_sine_model(t, pmax, t_offset, t_sys):
+        return pmax * np.sin(np.pi * (t - t_offset) / t_sys)
 
-    lower_bounds = np.array([0.0, np.pi / (2.0 * fit_duration), -4.0 * np.pi, -200.0])
-    upper_bounds = np.array([300.0, 8.0 * np.pi / fit_duration, 4.0 * np.pi, 300.0])
-    t_curve = np.linspace(float(t_start), float(t_end), 220)
-    x_curve = t_curve - t_start
+    pressure_peak_guess = max(float(np.nanmax(p_fit)), min_pmax or 0.0)
+    pmax_lower = max(pressure_peak_guess, min_pmax or 0.0, 1.0)
+    pmax_upper = max(300.0, pmax_lower * 2.5)
+    t_offset_lower = float(t_start - max(0.35, 0.60 * fit_duration))
+    t_offset_upper = float(t_start)
+    t_sys_lower = max(0.12, 0.80 * fit_duration)
+    t_sys_upper = max(0.80, 2.20 * fit_duration)
+    lower_bounds = np.array([pmax_lower, t_offset_lower, t_sys_lower])
+    upper_bounds = np.array([pmax_upper, t_offset_upper, t_sys_upper])
 
     def objective(params):
-        residuals = sine_model(x_fit, *params) - p_fit
-        if min_piso is None:
-            return residuals
-        piso_gap = min_piso - float(np.nanmax(sine_model(x_curve, *params)))
-        if piso_gap <= 0:
-            return residuals
-        return np.concatenate([residuals, np.repeat(piso_gap * 8.0, 8)])
+        pmax, t_offset, t_sys = params
+        residuals = half_sine_model(t_fit, pmax, t_offset, t_sys) - p_fit
+        penalties = []
+        if t_offset + t_sys < t_end:
+            penalties.append((t_end - (t_offset + t_sys)) * pmax * 5.0)
+        phase = np.pi * (t_fit - t_offset) / t_sys
+        outside = (phase < 0.0) | (phase > np.pi)
+        if np.any(outside):
+            penalties.extend(np.repeat(pmax * 0.5, int(np.sum(outside))))
+        return np.concatenate([residuals, np.asarray(penalties, dtype=float)]) if penalties else residuals
 
     candidate_params = []
-    for omega_factor in (0.75, 1.0, 1.5, 2.0):
-        for phase0 in (-np.pi, -np.pi / 2.0, 0.0, np.pi / 2.0, np.pi):
-            candidate_params.append([amp0, omega0 * omega_factor, phase0, offset0])
-    if min_piso is not None:
-        candidate_params.append([
-            max(min_piso - float(np.nanmin(p_fit)), amp0, 1.0),
-            omega0,
-            -np.pi / 2.0,
-            float(np.nanmin(p_fit)),
-        ])
+    for p_scale in (1.0, 1.25, 1.5, 1.8):
+        for offset_shift in (0.00, 0.05, 0.10, 0.15):
+            for sys_scale in (1.1, 1.35, 1.6, 1.9):
+                candidate_params.append([
+                    pmax_lower * p_scale,
+                    float(t_start - offset_shift),
+                    max(fit_duration * sys_scale, t_sys_lower),
+                ])
 
     best = None
     best_score = np.inf
@@ -1288,13 +1290,13 @@ def interpolate_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: floa
             continue
         if not result.success:
             continue
-        y_candidate = sine_model(x_curve, *result.x)
+        pmax, t_offset, t_sys = result.x
+        if t_offset + t_sys < t_end:
+            continue
+        y_candidate = half_sine_model(t_fit, pmax, t_offset, t_sys)
         if not np.isfinite(y_candidate).any():
             continue
-        candidate_piso = float(np.nanmax(y_candidate))
-        if min_piso is not None and candidate_piso < min_piso:
-            continue
-        score = float(np.nanmean((sine_model(x_fit, *result.x) - p_fit) ** 2))
+        score = float(np.nanmean((y_candidate - p_fit) ** 2))
         if score < best_score:
             best = result.x
             best_score = score
@@ -1302,17 +1304,22 @@ def interpolate_rv_piso_sine(t_fit: np.ndarray, p_fit: np.ndarray, t_start: floa
     if best is None:
         return None
 
-    y_curve = sine_model(x_curve, *best)
+    pmax, t_offset, t_sys = [float(v) for v in best]
+    t_curve = np.linspace(t_offset, t_offset + t_sys, 240)
+    y_curve = half_sine_model(t_curve, pmax, t_offset, t_sys)
     if not np.isfinite(y_curve).any():
         return None
     peak_idx = int(np.nanargmax(y_curve))
-    residuals = p_fit - sine_model(x_fit, *best)
+    residuals = p_fit - half_sine_model(t_fit, pmax, t_offset, t_sys)
     rmse = float(np.sqrt(np.nanmean(residuals ** 2))) if len(residuals) else np.nan
     return {
         "time_s": t_curve,
         "pressure_mmHg": y_curve,
-        "piso_mmHg": float(y_curve[peak_idx]),
+        "pmax_mmHg": pmax,
+        "piso_mmHg": pmax,
         "piso_time_s": float(t_curve[peak_idx]),
+        "t_offset_s": t_offset,
+        "t_sys_s": t_sys,
         "fit_rmse_mmHg": rmse,
         "fit_n": int(len(t_fit)),
     }
@@ -1490,13 +1497,13 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
         )
         fit_indices = np.flatnonzero(fit_mask)
         measured_peak = float(p_smooth[pressure_peak_idx])
-        min_piso = measured_peak + max(1.0, 0.02 * abs(measured_peak))
-        fit_result = interpolate_rv_piso_sine(
+        min_pmax = measured_peak + max(1.0, 0.02 * abs(measured_peak))
+        fit_result = interpolate_rv_pmax_half_sine(
             t_ok[fit_indices],
             p_smooth[fit_indices],
             float(t_ok[ic_onset_idx]),
             float(t_ok[ir_end_idx]),
-            min_piso=min_piso,
+            min_pmax=min_pmax,
         )
         if fit_result is not None:
             ic_fit_indices = np.flatnonzero((t_ok >= t_ok[ic_onset_idx]) & (t_ok <= t_ok[dpdt_max_idx]))
@@ -1518,9 +1525,12 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
                     "time_s": fit_result["time_s"],
                     "piso_fit_mmHg": fit_result["pressure_mmHg"],
                     "measured_peak_mmHg": measured_peak,
+                    "pmax_mmHg": fit_result["pmax_mmHg"],
                     "piso_mmHg": fit_result["piso_mmHg"],
                     "piso_margin_mmHg": fit_result["piso_mmHg"] - measured_peak,
                     "piso_time_s": fit_result["piso_time_s"],
+                    "t_offset_s": fit_result["t_offset_s"],
+                    "t_sys_s": fit_result["t_sys_s"],
                     "fit_rmse_mmHg": fit_result["fit_rmse_mmHg"],
                     "fit_n": fit_result["fit_n"],
                 }
@@ -1549,12 +1559,12 @@ def rv_single_beat_derivative_analysis(time_s: np.ndarray, pressure: np.ndarray,
                     {
                         **base_event,
                         "event": "Piso estimate",
-                        "method": "First derivative sine interpolation",
+                        "method": "Half-sine isovolumic interpolation",
                         "time_s": float(fit_result["piso_time_s"]),
                         "value": float(fit_result["piso_mmHg"]),
                         "row": "rv_peak_fit",
                         "description": (
-                            f"Sine interpolation peak pressure; {fit_result['piso_mmHg'] - measured_peak:.2f} mmHg "
+                            f"Half-sine Pmax/Piso; {fit_result['piso_mmHg'] - measured_peak:.2f} mmHg "
                             f"above measured RV peak; RMSE {fit_result['fit_rmse_mmHg']:.2f} mmHg"
                         ),
                     },
@@ -3448,7 +3458,7 @@ with viewer_tab:
             plot_rows += 3
             subplot_titles.extend(
                 [
-                    "RV beat peaks and first-derivative sine interpolation",
+                    "RV beat peaks and half-sine Pmax interpolation",
                     "First derivative method: dP/dt",
                     "Second derivative method: d2P/dt2",
                 ]
@@ -3573,11 +3583,11 @@ with viewer_tab:
                             x=fit_df["time_s"],
                             y=fit_df["piso_fit_mmHg"],
                             mode="lines",
-                            name=f"Beat {int(beat_id)} Piso sine interpolation",
+                            name=f"Beat {int(beat_id)} Pmax half-sine",
                             line=dict(color="rgb(217, 70, 239)", width=2.6, dash="dash"),
                             hovertemplate=(
-                                f"Beat {int(beat_id)} sine interpolation<br>Time: %{{x:.3f}} s<br>"
-                                "Interpolated pressure: %{y:.2f} mmHg<extra></extra>"
+                                f"Beat {int(beat_id)} half-sine isovolumic interpolation<br>Time: %{{x:.3f}} s<br>"
+                                "Piso model pressure: %{y:.2f} mmHg<extra></extra>"
                             ),
                             showlegend=int(beat_id) == int(rv_fits["beat_id"].min()),
                         ),
@@ -3682,17 +3692,17 @@ with viewer_tab:
             st.caption(
                 "RV single-beat derivative view based on Bellofiore et al. 2017: each beat is analyzed from QRS/R wave to QRS/R wave. "
                 "dP/dt max/min mark first-derivative IC/IR references; second-derivative minima mark candidate pulmonic valve opening/closing points. "
-                "The RV peak/Piso row marks measured RV peaks, the IC/IR samples used for sine interpolation, 20% dP/dt interpolation limits, and the first-derivative sine interpolation used to estimate Piso. "
+                "The RV peak/Piso row marks measured RV peaks, the IC/IR samples used for interpolation, 20% dP/dt interpolation limits, and the half-sine isovolumic interpolation used to estimate Pmax/Piso. "
                 f"Beat windows use the same-file RV ECG lead {rv_r_wave_source_signal or source_ecg.get('ecg_col', '')}. "
                 "This is a visual feature-identification layer, not yet a final Piso/Ees calculation."
             )
             if not rv_fits.empty:
                 fit_summary = (
-                    rv_fits[["beat_id", "measured_peak_mmHg", "piso_mmHg", "piso_margin_mmHg", "piso_time_s", "fit_rmse_mmHg", "fit_n"]]
+                    rv_fits[["beat_id", "measured_peak_mmHg", "pmax_mmHg", "piso_margin_mmHg", "piso_time_s", "t_offset_s", "t_sys_s", "fit_rmse_mmHg", "fit_n"]]
                     .drop_duplicates()
                     .sort_values("beat_id")
                 )
-                with st.expander("RV Piso sine interpolation summary", expanded=False):
+                with st.expander("RV Pmax/Piso half-sine interpolation summary", expanded=False):
                     st.dataframe(fit_summary, width="stretch", hide_index=True)
             with st.expander("RV derivative feature times", expanded=False):
                 st.dataframe(
