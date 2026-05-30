@@ -14,11 +14,12 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 DATABASE_TABLE = "labeled_interval_stats"
 DATABASE_SEGMENTS_TABLE = "labeled_interval_segments"
-APP_VERSION = "v0.8.20"
+APP_VERSION = "v0.8.21"
 APP_VERSION_DATE = "2026-05-30"
 
 THEMES = {
@@ -1355,7 +1356,29 @@ def reference_sort_key(reference: dict, pressure_col: str = "", source_filename:
 def render_reference_file(reference: dict):
     caption = f"Reference waveform output: {reference['name']}"
     if reference["ext"] == ".pdf":
-        st.pdf(reference["data"], height=620, key=f"reference_pdf_{reference['name']}")
+        pdf_b64 = base64.b64encode(reference["data"]).decode("ascii")
+        safe_caption = html.escape(caption)
+        components.html(
+            f"""
+            <div style="width:100%;">
+              <iframe
+                title="{safe_caption}"
+                src="data:application/pdf;base64,{pdf_b64}"
+                style="width:100%; height:620px; border:1px solid rgba(148,163,184,0.35); border-radius:8px;"
+              ></iframe>
+            </div>
+            """,
+            height=640,
+            scrolling=False,
+        )
+        st.download_button(
+            "Download reference PDF",
+            data=reference["data"],
+            file_name=reference["name"],
+            mime="application/pdf",
+            width="stretch",
+            key=f"download_reference_pdf_{reference['name']}",
+        )
         st.caption(caption)
     else:
         st.image(reference["data"], caption=caption, width="stretch")
